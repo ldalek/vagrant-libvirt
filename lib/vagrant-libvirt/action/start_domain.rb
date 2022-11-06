@@ -194,6 +194,58 @@ module VagrantPlugins
             end
           end
 
+          # Launch security
+          launchSecurity = REXML::XPath.first(xml_descr, '/domain/launchSecurity')
+          unless config.launchsecurity_data.nil?
+            if launchSecurity.nil?
+              @logger.debug "Launch security has been added"
+              launchSecurity = REXML::Element.new('launchSecurity', REXML::XPath.first(xml_descr, '/domain'))
+              descr_changed = true
+            end
+
+            [:cbitpos, :policy, :reducedPhysBits, :type].each do |setting|
+              setting_value = config.launchsecurity_data[setting]
+              element = REXML::XPath.first(launchSecurity, setting.to_s)
+              if !setting_value.nil?
+                if element.nil?
+                  element = launchSecurity.add_element(setting.to_s)
+                  descr_changed = true
+                end
+
+                if element.text != setting_value
+                  @logger.debug "launchSecurity #{setting.to_s} config changed"
+                  element.text = setting_value
+                  descr_changed = true
+                end
+              else
+                if !element.nil?
+                  launchSecurity.delete_element(setting.to_s)
+                  descr_changed = true
+                end
+              end
+            end
+
+            REXML::XPath.each( xml_descr, '/domain/devices/controller') do | controller |
+              driver_node = REXML::XPath.first(controller, 'driver')
+              if driver_node.nil?
+                driver_node = controller.add_element('driver')
+              end
+              driver_node.attributes['iommu'] = 'on'
+            end
+          else
+            unless launchSecurity.nil?
+              @logger.debug "Launch security to be deleted"
+
+              REXML::XPath.each( xml_descr, '/domain/devices/controller') do | controller |
+                driver_node = REXML::XPath.first(controller, 'driver')
+                if !driver_node.nil?
+                  result = driver_node.attributes.delete('iommu')
+                  descr_changed = true if !result.nil?
+                end
+              end
+            end
+          end
+
           # Graphics
           graphics = REXML::XPath.first(xml_descr, '/domain/devices/graphics')
           if config.graphics_type != 'none'

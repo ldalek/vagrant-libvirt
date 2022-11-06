@@ -704,6 +704,21 @@ describe VagrantPlugins::ProviderLibvirt::Config do
     end
   end
 
+  describe '#memtune' do
+    it 'should raise an exception without type' do
+      expect { subject.memtune(:value => 250000) }.to raise_error('Missing memtune type')
+    end
+
+    it 'should raise an exception if type unrecognized' do
+      expect { subject.memtune(:type => 'limit', :value => 250000) }.to raise_error('Memtune type \'limit\' not allowed (hard_limit, soft_limit, swap_hard_limit are allowed)')
+    end
+
+    it 'should accept multiple calls' do
+      expect(subject.memtune(:type => 'hard_limit', :value => 250000)).to be_truthy
+      expect(subject.memtune(:type => 'soft_limit', :value => 200000)).to be_truthy
+    end
+  end
+
   def assert_invalid
     subject.finalize!
     errors = subject.validate(machine).values.first
