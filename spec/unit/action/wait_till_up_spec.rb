@@ -1,11 +1,9 @@
 # frozen_string_literal: true
 
+require_relative '../../spec_helper'
+
 require 'vagrant-libvirt/action/wait_till_up'
 require 'vagrant-libvirt/errors'
-
-require 'spec_helper'
-require 'support/sharedcontext'
-require 'support/libvirt_context'
 
 describe VagrantPlugins::ProviderLibvirt::Action::WaitTillUp do
   subject { described_class.new(app, env) }
@@ -74,7 +72,7 @@ describe VagrantPlugins::ProviderLibvirt::Action::WaitTillUp do
         allow(domain).to receive(:wait_for).and_return(true)
         allow(env).to receive(:[]).and_call_original
         allow(env).to receive(:[]).with(:interrupted).and_return(false)
-        allow(driver).to receive(:get_domain_ipaddress).and_return('192.168.121.2')
+        allow(driver).to receive(:get_ipaddress).and_return('192.168.121.2')
       end
       it 'should call the next hook' do
         expect(app).to receive(:call)

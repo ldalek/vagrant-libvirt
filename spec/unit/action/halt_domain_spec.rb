@@ -1,8 +1,7 @@
 # frozen_string_literal: true
 
-require 'spec_helper'
-require 'support/sharedcontext'
-require 'support/libvirt_context'
+require_relative '../../spec_helper'
+
 require 'vagrant-libvirt/action/halt_domain'
 
 describe VagrantPlugins::ProviderLibvirt::Action::HaltDomain do

@@ -35,9 +35,7 @@ module VagrantPlugins
             # for VMs using sessions. It is likely that this should be done
             # to determine the correct virtual device for the management
             # network for sessions instead of assuming the default of virbr0.
-            @available_networks = libvirt_networks(
-              env[:machine].provider.driver.system_connection
-            )
+            @available_networks = libvirt_networks(env[:machine].provider.driver)
 
             @app.call(env)
             return
@@ -49,7 +47,7 @@ module VagrantPlugins
           @@lock.synchronize do
             # Iterate over networks If some network is not
             # available, create it if possible. Otherwise raise an error.
-            configured_networks(env, @logger).each do |options|
+            configured_networks(env[:machine], @logger).each do |options|
               # Only need to create private networks
               next if options[:iface_type] != :private_network ||
                       options.fetch(:tunnel_type, nil)
@@ -61,9 +59,7 @@ module VagrantPlugins
               # Get a list of all (active and inactive) Libvirt networks. This
               # list is used throughout this class and should be easier to
               # process than Libvirt API calls.
-              @available_networks = libvirt_networks(
-                env[:machine].provider.driver.connection.client
-              )
+              @available_networks = libvirt_networks(env[:machine].provider.driver)
 
               current_network = @available_networks.detect { |network| network[:name] == @options[:network_name] }
 

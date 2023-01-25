@@ -38,11 +38,27 @@ rescue LoadError
   end
 end
 
+require 'rspec'
+
 RSpec.configure do |config|
-  # set VAGRANT_HOME before any thing that requires vagrant is loaded to prevent
-  # the global plugin manager from trying to use the default VAGRANT_HOME.
-  temp_dir = Dir.mktmpdir("rspec-")
-  ENV['VAGRANT_HOME'] = temp_dir
+  require 'tmpdir'
+
+  if ENV['VAGRANT_LIBVIRT_VAGRANT_HOME'].nil?
+    # set VAGRANT_HOME before any thing that requires vagrant is loaded to prevent
+    # the global plugin manager from trying to use the default VAGRANT_HOME.
+    temp_dir = Dir.mktmpdir("rspec-")
+    ENV['VAGRANT_HOME'] = temp_dir
+
+    config.after(:suite) do
+      FileUtils.remove_entry temp_dir
+    end
+  else
+    ENV['VAGRANT_HOME'] = ENV['VAGRANT_LIBVIRT_VAGRANT_HOME']
+  end
+
+  # acceptance tests need the boxes dir to exist to allow symlinking of isolated
+  # environments while allowing the boxes to be cached.
+  FileUtils.mkdir_p(File.join(ENV['VAGRANT_HOME'], 'boxes'))
 
   # ensure that setting of LIBVIRT_DEFAULT_URI in the environment is not picked
   # up directly by tests, instead they must set as needed. Some build envs will
@@ -51,16 +67,29 @@ RSpec.configure do |config|
     ENV.delete('LIBVIRT_DEFAULT_URI')
   end
 
-  config.after(:suite) do
-    FileUtils.remove_entry temp_dir
-  end
-
   config.mock_with :rspec do |mocks|
     mocks.verify_partial_doubles = true
   end
 
   # don't run acceptance tests by default
   config.filter_run_excluding :acceptance => true
+
+  config.expect_with :rspec do |c|
+    c.max_formatted_output_length = 2000 if c.respond_to?("max_formatted_output_length=")
+  end
+end
+
+begin
+  require 'test-prof'
+
+  TestProf.configure do |config|
+    # use unique filenames for reports (by simply appending current timestamp)
+    config.timestamps = true
+
+    # color output
+    config.color = true
+  end
+rescue LoadError
 end
 
 require 'vagrant-spec/unit'

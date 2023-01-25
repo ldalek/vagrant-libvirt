@@ -83,6 +83,58 @@ Vagrant.configure("2") do |config|
 end
 ```
 
+## Using kernel and initrd
+
+It's possible to use a direct kernel boot to modify the kernel boot parameters used to boot the VM. This typically involves either downloading the kernel/initrd directly and placing somewhere locally for use, or making use of a tool such as `virt-copy-out` to extract the relevant files from a disk image file.
+
+Looking at a generic/fedora35 image with the following contents of /boot and /boot/grub2, it should be possible to copy out the kernel, initrd, and the grub.cfg file (provides a starting cmdline).
+```shell
+BOX_DIR="${VAGRANT_HOME:-~/.vagrant.d}/boxes/generic-VAGRANTSLASH-fedora35/4.1.10/libvirt"
+virt-ls -a ${BOX_DIR}/box.img /boot/ /boot/grub2
+.vmlinuz-5.18.19-100.fc35.x86_64.hmac
+System.map-5.18.19-100.fc35.x86_64
+config-5.18.19-100.fc35.x86_64
+efi
+grub2
+initramfs-0-rescue-5cbe0655dcd04b46a88f5a424135fbb8.img
+initramfs-5.18.19-100.fc35.x86_64.img
+loader
+symvers-5.18.19-100.fc35.x86_64.gz
+vmlinuz-0-rescue-5cbe0655dcd04b46a88f5a424135fbb8
+vmlinuz-5.18.19-100.fc35.x86_64
+device.map
+fonts
+grub.cfg
+grubenv
+i386-pc
+locale
+```
+
+Assuming you run something like the following:
+```shell
+BOX_DIR="${VAGRANT_HOME:-~/.vagrant.d}/boxes/generic-VAGRANTSLASH-fedora35/4.1.10/libvirt"
+virt-copy-out -a ${BOX_DIR}/box.img \
+  /boot/vmlinuz-5.18.19-100.fc35.x86_64 \
+  /boot/initramfs-5.18.19-100.fc35.x86_64.img \
+  /boot/grub2/grub.cfg \
+  .
+```
+
+The final Vagrantfile should contain something like the following:
+```ruby
+Vagrant.configure("2") do |config|
+  config.vm.box = "generic/fedora35"
+
+  config.vm.provider :libvirt do |libvirt|
+    libvirt.kernel = "#{Dir.pwd}/vmlinuz-5.18.19-100.fc35.x86_64"
+    libvirt.initrd = "#{Dir.pwd}/initramfs-5.18.19-100.fc35.x86_64.img"
+    # cmd_line is taken from the grub.cfg to ensure starting from a working value
+    libvirt.cmd_line = 'root=/dev/mapper/fedora-root ro biosdevname=0 no_timer_check ' +
+        'resume=/dev/mapper/fedora-swap rd.lvm.lv=fedora/root rd.lvm.lv=fedora/swap net.ifnames=0'
+  end
+end
+```
+
 ## SSH Access To VM
 
 vagrant-libvirt supports vagrant's [standard ssh
@@ -139,20 +191,25 @@ collisions for multi machine environments gracefully.
 Vagrant automatically syncs the project folder on the host to `/vagrant` in
 the guest. You can also configure additional synced folders.
 
+If the type is not specified, vagrant will attempt to select one based on the
+highest priority that is usable. This can mean that depending on whether you have
+the packages installed to support nfs and or rsync, you may experience different
+behaviour on different machines. Recommendation is to be explicit.
+
 **SECURITY NOTE:** for remote Libvirt, nfs synced folders requires a bridged
 public network interface and you must connect to Libvirt via ssh.
 
 **NFS**
 
 `vagrant-libvirt` supports
-[NFS](https://www.vagrantup.com/docs/synced-folders/nfs) as default with
+[NFS](https://www.vagrantup.com/docs/synced-folders/nfs) as with
 bidirectional synced folders.
 
 Example with NFS:
 
 ``` ruby
 Vagrant.configure("2") do |config|
-  config.vm.synced_folder "./", "/vagrant"
+  config.vm.synced_folder "./", "/vagrant", type: "nfs"
 end
 ```
 
@@ -419,6 +476,66 @@ Vagrant.configure("2") do |config|
   end
 end
 ```
+
+## Secure Encryption Virtualization (SEV)
+
+Secure Encryption Virtualization is supported by libvirt and by the vagrant-libvirt provider but comes with several requirements.
+
+This mode has only been tested with q35 types of machines, so you'll need an UEFI boot
+
+```ruby
+Vagrant.configure("2") do |config|
+  config.vm.provider :libvirt do |libvirt|
+    libvirt.loader = "/usr/share/OVMF/OVMF_CODE.fd"
+    libvirt.nvram = "/path/to/ovmf/OVMF_VARS.fd"
+    libvirt.machine_type = 'pc-q35-focal'
+  end
+end
+```
+
+Read the libvirt documentaiton to understand what OVMF is and how to use it.
+
+Next, you'll want to call the following methods:
+```ruby
+Vagrant.configure("2") do |config|
+  config.vm.provider :libvirt do |libvirt|
+    libvirt.launchsecurity :type => 'sev', :cbitpos => 47, :reducedPhysBits => 1, :policy => "0x0003"
+    libvirt.memtune :type => "hard_limit", :value => 2500000 # Note here the value in kB (not in Mb)
+  end
+end
+```
+
+Note that the value provided in the memtune `hard_limit` is in Kb by default. It should be higher than the
+one given in `libvirt.memory` (which is in Mb, by the way) by some amount (again, check out the [https://libvirt.org/kbase/launch_security_sev.html](documentation)) to understand why.
+
+It is also necessary to explicitly define the memballoon for it to accept the iommu flag.
+
+```ruby
+Vagrant.configure("2") do |config|
+  config.vm.provider :libvirt do |libvirt|
+    libvirt.memballoon_enabled = true
+    libvirt.memballoon_model = 'virtio'
+    libvirt.memballoon_pci_bus = '0x07'
+    libvirt.memballoon_pci_slot = '0x00'
+  end
+end
+```
+
+And finally, because the iommu flag has to be passed to the networks, you also need to set it explicitly:
+
+```ruby
+Vagrant.configure("2") do |config|
+  config.vm.provider :libvirt do |libvirt|
+    # Management network only (the NAT'ed network provided by Vagrant)
+    libvirt.management_network_driver_iommu = true
+  end
+  # Example in defining a bridge
+  config.vm.network :public_network, :dev => "br0", :bridge => "br0", :mode => "bridge", :type => "bridge", :driver_iommu => true # <== Note here the additional flag
+end
+```
+
+Don't forget that you'll need an UEFI base box.
+
 
 ## Libvirt communication channels
 

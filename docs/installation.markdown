@@ -81,7 +81,7 @@ docker pull vagrantlibvirt/vagrant-libvirt:latest
 
 Running the image:
 ```bash
-docker run -i --rm \
+docker run -it --rm \
   -e LIBVIRT_DEFAULT_URI \
   -v /var/run/libvirt/:/var/run/libvirt/ \
   -v ~/.vagrant.d:/.vagrant.d \
@@ -95,7 +95,7 @@ docker run -i --rm \
 It's possible to define a function in `~/.bashrc`, for example:
 ```bash
 vagrant(){
-  docker run -i --rm \
+  docker run -it --rm \
     -e LIBVIRT_DEFAULT_URI \
     -v /var/run/libvirt/:/var/run/libvirt/ \
     -v ~/.vagrant.d:/.vagrant.d \
@@ -166,7 +166,7 @@ You may need to modify your `sources.list` to uncomment the deb-src entries wher
 ```shell
 sudo apt-get purge vagrant-libvirt
 sudo apt-mark hold vagrant-libvirt
-sudo apt-get install -y qemu libvirt-daemon-system ebtables libguestfs-tools
+sudo apt-get install -y qemu libvirt-daemon-system libvirt-dev ebtables libguestfs-tools
 sudo apt-get install -y vagrant ruby-fog-libvirt
 vagrant plugin install vagrant-libvirt
 ```
@@ -222,7 +222,9 @@ sudo dnf remove vagrant-libvirt
 sudo sed -i \
     '/^\(exclude=.*\)/ {/vagrant-libvirt/! s//\1 vagrant-libvirt/;:a;n;ba;q}; $aexclude=vagrant-libvirt' \
     /etc/dnf/dnf.conf
-sudo dnf install --assumeyes @virtualization vagrant rubygem-fog-libvirt
+vagrant_libvirt_deps=($(sudo dnf repoquery --disableexcludes main --depends vagrant-libvirt 2>/dev/null | cut -d' ' -f1))
+dependencies=$(sudo dnf repoquery --qf "%{name}" ${vagrant_libvirt_deps[@]/#/--whatprovides })
+sudo dnf install --assumeyes @virtualization ${dependencies}
 ```
 
 The above `sed` command will add `vagrant-libvirt` to the list of packages to be excluded from being installed.
@@ -237,6 +239,8 @@ rather than exclude all versions.
   ```shell
   sudo dnf install --assumeyes libvirt libguestfs-tools \
       gcc libvirt-devel libxml2-devel make ruby-devel
+  # additional deps to rebuild libraries in upstream vagrant package.
+  sudo dnf install --assumeyes byacc cmake gcc-c++ wget zlib-devel
   ```
 
   Before installing the plugin it is necessary to compile some libraries to replace those
@@ -265,21 +269,35 @@ vagrant plugin install vagrant-libvirt
 
 ### CentOS
 
-#### CentOS 8
+#### CentOS 9 Stream
 
 {% include upstream-vagrant-install.html distro="centos" -%}
+  Subsequent install remaining dependencies and plugin
+
+  ```shell
+  sudo dnf config-manager --set-enabled crb
+  sudo dnf install -y '@Virtualization Hypervisor' '@Virtualization Tools' \
+      '@Development Tools' 'libvirt-devel'
+  vagrant plugin install vagrant-libvirt
+  ```
+
+#### CentOS 8 (and Stream)
+
+{% include upstream-vagrant-install.html distro="centos8" -%}
   Subsequently install remaining dependencies:
 
   ```shell
   sudo dnf install --assumeyes libvirt libguestfs-tools \
-      gcc libvirt-devel libxml2-devel make ruby-devel
+      gcc libvirt-devel libxml2-devel make pkgconf-pkg-config ruby-devel
+  # additional deps to rebuild libraries in upstream vagrant package.
+  sudo dnf install --assumeyes byacc cmake gcc-c++ rpm-build wget zlib-devel
   ```
 
   Before installing the plugin it is necessary to compile some libraries to replace those
   shipped with the upstream vagrant to prevent the following errors from appearing when
   vagrant attempts to use vagrant-libvirt on recent CentOS releases.
 
-{% include patch-vagrant-install.html distro="fedora" %}
+{% include patch-vagrant-install.html distro="centos" %}
 
   Finally install the plugin:
   ```
@@ -288,7 +306,7 @@ vagrant plugin install vagrant-libvirt
 
 #### CentOS 6 & 7
 
-{% include upstream-vagrant-install.html distro="centos" -%}
+{% include upstream-vagrant-install.html distro="centos6" -%}
 And subsequently install remaining dependencies and plugin:
 ```shell
 sudo yum install --assumeyes qemu qemu-kvm libvirt libguestfs-tools \
@@ -311,9 +329,30 @@ sudo zypper addlock vagrant-libvirt
 fog_libvirt_pkg="$(
     sudo zypper --terse -n --quiet search --provides "rubygem(fog-libvirt)" | \
     tail -n1 | cut -d' ' -f4)"
-sudo zypper install --no-confirm libvirt qemu-kvm libguestfs vagrant ${fog_libvirt_pkg}
+sudo zypper install --no-confirm libvirt qemu-kvm libguestfs polkit vagrant ${fog_libvirt_pkg}
 vagrant plugin install vagrant-libvirt
 ```
+
+{% include upstream-vagrant-install.html distro="opensuse" -%}
+  Subsequently install remaining dependencies:
+
+  ```shell
+  sudo zypper install --no-confirm libvirt qemu-kvm libguestfs \
+      gcc make libvirt-devel polkit ruby-devel
+  # additional deps to rebuild libraries in upstream vagrant package.
+  sudo zypper install --no-confirm byacc cmake gcc-++ libssh4 perl-XML-XPath wget zlib-devel
+  ```
+
+  Before installing the plugin it is necessary to compile some libraries to replace those
+  shipped with the upstream vagrant to prevent the following errors from appearing when
+  vagrant attempts to use vagrant-libvirt on recent OpenSUSE Leap releases.
+
+{% include patch-vagrant-install.html distro="opensuse" %}
+
+  Finally install the plugin:
+  ```
+  vagrant plugin install vagrant-libvirt
+  ```
 
 ### Arch
 

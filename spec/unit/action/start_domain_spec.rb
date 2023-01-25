@@ -1,11 +1,10 @@
 # frozen_string_literal: true
 
-require 'spec_helper'
-require 'support/sharedcontext'
-require 'support/libvirt_context'
+require_relative '../../spec_helper'
 
 require 'vagrant-libvirt/errors'
 require 'vagrant-libvirt/action/start_domain'
+require 'vagrant-libvirt/util/unindent'
 
 describe VagrantPlugins::ProviderLibvirt::Action::StartDomain do
   subject { described_class.new(app, env) }
@@ -34,6 +33,7 @@ describe VagrantPlugins::ProviderLibvirt::Action::StartDomain do
 
       allow(logger).to receive(:debug)
       allow(logger).to receive(:info)
+      allow(ui).to receive(:info)
 
       allow(libvirt_domain).to receive(:xml_desc).and_return(domain_xml)
 
@@ -42,7 +42,7 @@ describe VagrantPlugins::ProviderLibvirt::Action::StartDomain do
     end
 
     it 'should execute without changing' do
-      expect(ui).to_not receive(:error)
+      expect(ui).to_not receive(:warn)
       expect(libvirt_client).to_not receive(:define_domain_xml)
       expect(libvirt_domain).to receive(:autostart=)
       expect(domain).to receive(:start)
@@ -64,7 +64,27 @@ describe VagrantPlugins::ProviderLibvirt::Action::StartDomain do
       end
 
       it 'should correctly detect the domain was updated' do
-        expect(ui).to_not receive(:error)
+        expect(ui).to_not receive(:warn)
+        expect(libvirt_domain).to receive(:autostart=)
+        expect(connection).to receive(:define_domain).and_return(libvirt_domain)
+        expect(libvirt_domain).to receive(:xml_desc).and_return(domain_xml, updated_domain_xml)
+        expect(domain).to receive(:start)
+
+        expect(subject.call(env)).to be_nil
+      end
+    end
+
+    context 'when xml elements and attributes reordered' do
+      let(:test_file) { 'existing.xml' }
+      let(:updated_test_file) { 'existing_reordered.xml' }
+      let(:vagrantfile_providerconfig) do
+        <<-EOF
+        libvirt.cpu_mode = "host-passthrough"
+        EOF
+      end
+
+      it 'should correctly detect the domain was updated' do
+        expect(ui).to_not receive(:warn)
         expect(libvirt_domain).to receive(:autostart=)
         expect(connection).to receive(:define_domain).and_return(libvirt_domain)
         expect(libvirt_domain).to receive(:xml_desc).and_return(domain_xml, updated_domain_xml)
@@ -115,7 +135,7 @@ describe VagrantPlugins::ProviderLibvirt::Action::StartDomain do
       }
 
       it 'should update the domain' do
-        expect(ui).to_not receive(:error)
+        expect(ui).to_not receive(:warn)
         expect(libvirt_domain).to receive(:autostart=)
         expect(connection).to receive(:define_domain).and_return(libvirt_domain)
         expect(libvirt_domain).to receive(:xml_desc).and_return(domain_xml, updated_domain_xml)
@@ -142,6 +162,237 @@ describe VagrantPlugins::ProviderLibvirt::Action::StartDomain do
       end
     end
 
+    context 'cpu' do
+      let(:test_file) { 'existing.xml' }
+      let(:updated_domain_xml) {
+        new_xml = domain_xml.dup
+        new_xml.gsub!(
+          /<cpu .*\/>/,
+          <<-EOF
+          <cpu check='partial' mode='custom'>
+            <model fallback='allow'>Haswell</model>
+            <feature name='vmx' policy='optional'/>
+            <feature name='svm' policy='optional'/>
+          </cpu>
+          EOF
+        )
+        new_xml
+      }
+      let(:vagrantfile_providerconfig) {
+        <<-EOF
+        libvirt.cpu_mode = 'custom'
+        libvirt.cpu_model = 'Haswell'
+        libvirt.nested = true
+        EOF
+      }
+
+      it 'should set cpu related settings when changed' do
+        expect(ui).to_not receive(:warn)
+        expect(connection).to receive(:define_domain).and_return(libvirt_domain)
+        expect(libvirt_domain).to receive(:xml_desc).and_return(domain_xml, updated_domain_xml)
+        expect(libvirt_domain).to receive(:autostart=)
+        expect(domain).to receive(:start)
+
+        expect(subject.call(env)).to be_nil
+      end
+
+      let(:domain_xml_no_cpu) {
+        new_xml = domain_xml.dup
+        new_xml.gsub!(/<cpu .*\/>/, '')
+        new_xml
+      }
+      let(:updated_domain_xml_new_cpu) {
+        new_xml = domain_xml.dup
+        new_xml.gsub!(
+          /<cpu .*\/>/,
+          <<-EOF
+          <cpu mode='custom'>
+            <model fallback='allow'>Haswell</model>
+            <feature name='vmx' policy='optional'/>
+            <feature name='svm' policy='optional'/>
+          </cpu>
+          EOF
+        )
+        new_xml
+      }
+
+      it 'should add cpu settings if not already present' do
+        expect(ui).to_not receive(:warn)
+        expect(connection).to receive(:define_domain).and_return(libvirt_domain)
+        expect(libvirt_domain).to receive(:xml_desc).and_return(domain_xml_no_cpu, updated_domain_xml_new_cpu)
+        expect(libvirt_domain).to receive(:autostart=)
+        expect(domain).to receive(:start)
+
+        expect(subject.call(env)).to be_nil
+      end
+    end
+
+    context 'launchSecurity' do
+      let(:updated_domain_xml_new_launch_security) {
+        new_xml = domain_xml.dup
+        new_xml.gsub!(
+          /<\/devices>/,
+          <<-EOF.unindent.rstrip
+          </devices>
+            <launchSecurity type='sev'>
+              <cbitpos>47</cbitpos>
+              <reducedPhysBits>1</reducedPhysBits>
+              <policy>0x0003</policy>
+            </launchSecurity>
+          EOF
+        )
+        new_xml
+      }
+
+      it 'should create if not already set' do
+        machine.provider_config.launchsecurity_data = {:type => 'sev', :cbitpos => 47, :reducedPhysBits => 1, :policy => "0x0003"}
+
+        expect(ui).to_not receive(:warn)
+        expect(connection).to receive(:define_domain).and_return(libvirt_domain)
+        expect(libvirt_domain).to receive(:xml_desc).and_return(domain_xml, updated_domain_xml_new_launch_security)
+        expect(libvirt_domain).to receive(:autostart=)
+        expect(domain).to receive(:start)
+
+        expect(subject.call(env)).to be_nil
+      end
+
+      context 'already exists' do
+        let(:domain_xml_launch_security) { updated_domain_xml_new_launch_security }
+        let(:updated_domain_xml_launch_security) {
+          new_xml = domain_xml_launch_security.dup
+          new_xml.gsub!(/<cbitpos>47/, '<cbitpos>48')
+          new_xml.gsub!(/<reducedPhysBits>1/, '<reducedPhysBits>2')
+          new_xml.gsub!(/<policy>0x0003/, '<policy>0x0004')
+          new_xml
+        }
+
+
+        it 'should update all settings' do
+          machine.provider_config.launchsecurity_data = {:type => 'sev', :cbitpos => 48, :reducedPhysBits => 2, :policy => "0x0004"}
+
+          expect(ui).to_not receive(:warn)
+          expect(connection).to receive(:define_domain).and_return(libvirt_domain)
+          expect(libvirt_domain).to receive(:xml_desc).and_return(domain_xml_launch_security, updated_domain_xml_launch_security)
+          expect(libvirt_domain).to receive(:autostart=)
+          expect(domain).to receive(:start)
+
+          expect(subject.call(env)).to be_nil
+        end
+
+        it 'should remove if disabled' do
+          machine.provider_config.launchsecurity_data = nil
+
+          expect(ui).to_not receive(:warn)
+          expect(connection).to receive(:define_domain).and_return(libvirt_domain)
+          expect(libvirt_domain).to receive(:xml_desc).and_return(domain_xml_launch_security, domain_xml)
+          expect(libvirt_domain).to receive(:autostart=)
+          expect(domain).to receive(:start)
+
+          expect(subject.call(env)).to be_nil
+        end
+
+        context 'with controllers' do
+          # makes domain_xml contain 2 controllers and memballoon
+          # which should mean that launchsecurity element exists, but without
+          # iommu set on controllers
+          let(:test_file) { 'existing.xml' }
+          let(:updated_domain_xml_launch_security_controllers) {
+            new_xml = updated_domain_xml_new_launch_security.dup
+            new_xml.gsub!(
+              /<controller type='pci' index='0' model='pci-root'\/>/,
+              "<controller type='pci' index='0' model='pci-root'><driver iommu='on'/></controller>",
+            )
+            new_xml.gsub!(
+              /(<address type='pci' domain='0x0000' bus='0x00' slot='0x01' function='0x2'\/>)/,
+              '\1<driver iommu="on"/>',
+            )
+            # memballoon
+            new_xml.gsub!(
+              /(<address type='pci' domain='0x0000' bus='0x00' slot='0x04' function='0x0'\/>)/,
+              '\1<driver iommu="on"/>',
+            )
+            new_xml
+          }
+
+          it 'should set driver iommu on all controllers' do
+            machine.provider_config.launchsecurity_data = {:type => 'sev', :cbitpos => 47, :reducedPhysBits => 1, :policy => "0x0003"}
+
+            expect(ui).to_not receive(:warn)
+            expect(connection).to receive(:define_domain).and_return(libvirt_domain)
+            expect(libvirt_domain).to receive(:xml_desc).and_return(domain_xml_launch_security, updated_domain_xml_launch_security_controllers)
+            expect(libvirt_domain).to receive(:autostart=)
+            expect(domain).to receive(:start)
+
+            expect(subject.call(env)).to be_nil
+          end
+        end
+      end
+    end
+
+    context 'graphics' do
+      context 'autoport not disabled' do
+        let(:test_file) { 'existing.xml' }
+        let(:launched_domain_xml) {
+          new_xml = domain_xml.dup
+          new_xml.gsub!(/graphics type='vnc' port='-1'/m, "graphics type='vnc' port='5900'")
+          new_xml
+        }
+
+        it 'should retrieve the port from XML' do
+          expect(ui).to_not receive(:warn)
+          expect(connection).to_not receive(:define_domain)
+          expect(libvirt_domain).to receive(:xml_desc).and_return(domain_xml, launched_domain_xml)
+          expect(libvirt_domain).to receive(:autostart=)
+          expect(domain).to receive(:start)
+          expect(ui).to receive(:info).with(' -- Graphics Port:      5900')
+
+          expect(subject.call(env)).to be_nil
+        end
+      end
+
+      [
+        [
+          'when port explicitly set, should set autoport=no',
+          proc { |config|
+            config.graphics_port = 5901
+          },
+          "<graphics autoport='yes' keymap='en-us' listen='127.0.0.1' port='-1' type='vnc' websocket='-1'/>",
+          "<graphics autoport='no' keymap='en-us' listen='127.0.0.1' port='5901' type='vnc' websocket='-1'/>",
+        ],
+        [
+          'when port updated, should set autoport=no and update port',
+          proc { |config|
+            config.graphics_port = 5902
+          },
+          "<graphics autoport='no' keymap='en-us' listen='127.0.0.1' port='5901' type='vnc' websocket='-1'/>",
+          "<graphics autoport='no' keymap='en-us' listen='127.0.0.1' port='5902' type='vnc' websocket='-1'/>",
+        ],
+        [
+          'when autoport set and no port, should set autoport=yes and update port to -1',
+          proc { |config|
+            config.graphics_autoport = 'yes'
+          },
+          "<graphics autoport='no' keymap='en-us' listen='127.0.0.1' port='5901' type='vnc' websocket='-1'/>",
+          "<graphics autoport='yes' keymap='en-us' listen='127.0.0.1' port='-1' type='vnc' websocket='-1'/>",
+        ],
+      ].each do |description, config_proc, graphics_xml_start, graphics_xml_output|
+        it "#{description}" do
+          config_proc.call(machine.provider_config)
+
+          initial_domain_xml = domain_xml.gsub(/<graphics .*\/>/, graphics_xml_start)
+          updated_domain_xml = domain_xml.gsub(/<graphics .*\/>/, graphics_xml_output)
+
+          expect(ui).to_not receive(:warn)
+          expect(connection).to receive(:define_domain).with(match(graphics_xml_output)).and_return(libvirt_domain)
+          expect(libvirt_domain).to receive(:xml_desc).and_return(initial_domain_xml, updated_domain_xml, updated_domain_xml)
+          expect(libvirt_domain).to receive(:autostart=)
+          expect(domain).to receive(:start)
+
+          expect(subject.call(env)).to be_nil
+        end
+      end
+    end
+
     context 'nvram' do
       context 'when being added to existing' do
         let(:vagrantfile_providerconfig) do
@@ -154,7 +405,7 @@ describe VagrantPlugins::ProviderLibvirt::Action::StartDomain do
         let(:updated_test_file) { 'existing_added_nvram.xml' }
 
         it 'should add the nvram element' do
-          expect(ui).to_not receive(:error)
+          expect(ui).to_not receive(:warn)
           expect(connection).to receive(:define_domain).with(updated_domain_xml).and_return(libvirt_domain)
           expect(libvirt_domain).to receive(:xml_desc).and_return(domain_xml, updated_domain_xml)
           expect(libvirt_domain).to receive(:autostart=)
@@ -175,7 +426,7 @@ describe VagrantPlugins::ProviderLibvirt::Action::StartDomain do
         let(:updated_test_file) { 'nvram_domain_other_setting.xml' }
 
         it 'should keep the XML element' do
-          expect(ui).to_not receive(:error)
+          expect(ui).to_not receive(:warn)
           expect(connection).to receive(:define_domain).with(updated_domain_xml).and_return(libvirt_domain)
           expect(libvirt_domain).to receive(:xml_desc).and_return(domain_xml, updated_domain_xml)
           expect(libvirt_domain).to receive(:autostart=)
@@ -189,7 +440,7 @@ describe VagrantPlugins::ProviderLibvirt::Action::StartDomain do
           let(:updated_test_file) { 'nvram_domain_removed.xml' }
 
           it 'should delete the XML element' do
-            expect(ui).to_not receive(:error)
+            expect(ui).to_not receive(:warn)
             expect(connection).to receive(:define_domain).with(updated_domain_xml).and_return(libvirt_domain)
             expect(libvirt_domain).to receive(:xml_desc).and_return(domain_xml, updated_domain_xml)
             expect(libvirt_domain).to receive(:autostart=)
@@ -213,7 +464,7 @@ describe VagrantPlugins::ProviderLibvirt::Action::StartDomain do
         end
 
         it 'should modify the domain tpm_path' do
-          expect(ui).to_not receive(:error)
+          expect(ui).to_not receive(:warn)
           expect(logger).to receive(:debug).with('tpm config changed')
           expect(connection).to receive(:define_domain).with(updated_domain_xml).and_return(libvirt_domain)
           expect(libvirt_domain).to receive(:xml_desc).and_return(domain_xml, updated_domain_xml)
@@ -235,7 +486,7 @@ describe VagrantPlugins::ProviderLibvirt::Action::StartDomain do
         end
 
         it 'should modify the domain tpm_path' do
-          expect(ui).to_not receive(:error)
+          expect(ui).to_not receive(:warn)
           expect(logger).to receive(:debug).with('tpm config changed')
           expect(connection).to receive(:define_domain).with(updated_domain_xml).and_return(libvirt_domain)
           expect(libvirt_domain).to receive(:xml_desc).and_return(domain_xml, updated_domain_xml)
@@ -258,7 +509,7 @@ describe VagrantPlugins::ProviderLibvirt::Action::StartDomain do
         end
 
         it 'should execute without changing' do
-          expect(ui).to_not receive(:error)
+          expect(ui).to_not receive(:warn)
           expect(libvirt_domain).to receive(:autostart=)
           expect(domain).to receive(:start)
 
@@ -278,7 +529,7 @@ describe VagrantPlugins::ProviderLibvirt::Action::StartDomain do
         end
 
         it 'should execute without changing' do
-          expect(ui).to_not receive(:error)
+          expect(ui).to_not receive(:warn)
           expect(libvirt_domain).to receive(:autostart=)
           expect(domain).to receive(:start)
 
@@ -298,7 +549,7 @@ describe VagrantPlugins::ProviderLibvirt::Action::StartDomain do
         end
 
         it 'should modify the domain' do
-          expect(ui).to_not receive(:error)
+          expect(ui).to_not receive(:warn)
           expect(logger).to receive(:debug).with('tpm config changed')
           expect(connection).to receive(:define_domain).with(updated_domain_xml).and_return(libvirt_domain)
           expect(libvirt_domain).to receive(:xml_desc).and_return(domain_xml, updated_domain_xml)
@@ -321,7 +572,7 @@ describe VagrantPlugins::ProviderLibvirt::Action::StartDomain do
         end
 
         it 'should not modify the domain' do
-          expect(ui).to_not receive(:error)
+          expect(ui).to_not receive(:warn)
           expect(logger).to_not receive(:debug).with('clock timers config changed')
           expect(connection).to_not receive(:define_domain)
           expect(libvirt_domain).to receive(:autostart=)
@@ -342,7 +593,7 @@ describe VagrantPlugins::ProviderLibvirt::Action::StartDomain do
         let(:updated_test_file) { 'clock_timer_rtc_tsc.xml' }
 
         it 'should modify the domain' do
-          expect(ui).to_not receive(:error)
+          expect(ui).to_not receive(:warn)
           expect(logger).to receive(:debug).with('clock timers config changed')
           expect(connection).to receive(:define_domain).with(match(/<clock offset='utc'>\s*<timer name='rtc'\/>\s*<timer name='tsc'\/>\s*<\/clock>/)).and_return(libvirt_domain)
           expect(libvirt_domain).to receive(:xml_desc).and_return(domain_xml, updated_domain_xml)
@@ -357,7 +608,7 @@ describe VagrantPlugins::ProviderLibvirt::Action::StartDomain do
         let(:updated_test_file) { 'clock_timer_removed.xml' }
 
         it 'should modify the domain' do
-          expect(ui).to_not receive(:error)
+          expect(ui).to_not receive(:warn)
           expect(logger).to receive(:debug).with('clock timers config changed')
           expect(connection).to receive(:define_domain).with(match(/<clock offset='utc'>\s*<\/clock>/)).and_return(libvirt_domain)
           expect(libvirt_domain).to receive(:xml_desc).and_return(domain_xml, updated_domain_xml)

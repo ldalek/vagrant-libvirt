@@ -18,21 +18,23 @@ module VagrantPlugins
       module NetworkUtil
         include Vagrant::Util::NetworkIP
 
-        def configured_networks(env, logger)
-          qemu_use_session = env[:machine].provider_config.qemu_use_session
-          qemu_use_agent = env[:machine].provider_config.qemu_use_agent
-          management_network_device = env[:machine].provider_config.management_network_device
-          management_network_name = env[:machine].provider_config.management_network_name
-          management_network_address = env[:machine].provider_config.management_network_address
-          management_network_mode = env[:machine].provider_config.management_network_mode
-          management_network_mac = env[:machine].provider_config.management_network_mac
-          management_network_guest_ipv6 = env[:machine].provider_config.management_network_guest_ipv6
-          management_network_autostart = env[:machine].provider_config.management_network_autostart
-          management_network_pci_bus = env[:machine].provider_config.management_network_pci_bus
-          management_network_pci_slot = env[:machine].provider_config.management_network_pci_slot
-          management_network_domain = env[:machine].provider_config.management_network_domain
-          management_network_mtu = env[:machine].provider_config.management_network_mtu
-          management_network_keep = env[:machine].provider_config.management_network_keep
+        def configured_networks(machine, logger)
+          qemu_use_session = machine.provider_config.qemu_use_session
+          qemu_use_agent = machine.provider_config.qemu_use_agent
+          management_network_device = machine.provider_config.management_network_device
+          management_network_name = machine.provider_config.management_network_name
+          management_network_address = machine.provider_config.management_network_address
+          management_network_mode = machine.provider_config.management_network_mode
+          management_network_mac = machine.provider_config.management_network_mac
+          management_network_guest_ipv6 = machine.provider_config.management_network_guest_ipv6
+          management_network_autostart = machine.provider_config.management_network_autostart
+          management_network_pci_bus = machine.provider_config.management_network_pci_bus
+          management_network_pci_slot = machine.provider_config.management_network_pci_slot
+          management_network_domain = machine.provider_config.management_network_domain
+          management_network_mtu = machine.provider_config.management_network_mtu
+          management_network_keep = machine.provider_config.management_network_keep
+          management_network_driver_iommu = machine.provider_config.management_network_driver_iommu
+          management_network_model_type = machine.provider_config.management_network_model_type
           logger.info "Using #{management_network_name} at #{management_network_address} as the management network #{management_network_mode} is the mode"
 
           begin
@@ -53,6 +55,7 @@ module VagrantPlugins
           if qemu_use_session
             management_network_options = {
               iface_type: :public_network,
+              model_type: management_network_model_type,
               dev: management_network_device,
               mode: 'bridge',
               type: 'bridge',
@@ -62,6 +65,7 @@ module VagrantPlugins
           else
             management_network_options = {
               iface_type: :private_network,
+              model_type: management_network_model_type,
               network_name: management_network_name,
               ip: Regexp.last_match(1),
               netmask: Regexp.last_match(2),
@@ -74,7 +78,7 @@ module VagrantPlugins
             }
           end
 
-
+          management_network_options[:driver_iommu] = management_network_driver_iommu
 
           unless management_network_mac.nil?
             management_network_options[:mac] = management_network_mac
@@ -100,23 +104,23 @@ module VagrantPlugins
           # if there is a box and management network is disabled
           # need qemu agent enabled and at least one network that can be accessed
           if (
-            env[:machine].config.vm.box &&
-            !env[:machine].provider_config.mgmt_attach &&
-            !env[:machine].provider_config.qemu_use_agent &&
-            !env[:machine].config.vm.networks.any? { |type, _| ["private_network", "public_network"].include?(type.to_s) }
+            machine.config.vm.box &&
+            !machine.provider_config.mgmt_attach &&
+            !machine.provider_config.qemu_use_agent &&
+            !machine.config.vm.networks.any? { |type, _| ["private_network", "public_network"].include?(type.to_s) }
           )
             raise Errors::ManagementNetworkRequired
           end
 
           # add management network to list of networks to check
           # unless mgmt_attach set to false
-          networks = if env[:machine].provider_config.mgmt_attach
+          networks = if machine.provider_config.mgmt_attach
                        [management_network_options]
                      else
                        []
                      end
 
-          env[:machine].config.vm.networks.each do |type, original_options|
+          machine.config.vm.networks.each do |type, original_options|
             logger.debug "In config found network type #{type} options #{original_options}"
             # Options can be specified in Vagrantfile in short format (:ip => ...),
             # or provider format # (:libvirt__network_name => ...).
@@ -149,17 +153,11 @@ module VagrantPlugins
 
         # Return a list of all (active and inactive) Libvirt networks as a list
         # of hashes with their name, network address and status (active or not)
-        def libvirt_networks(libvirt_client)
+        def libvirt_networks(driver)
           libvirt_networks = []
 
-          active = libvirt_client.list_networks
-          inactive = libvirt_client.list_defined_networks
-
           # Iterate over all (active and inactive) networks.
-          active.concat(inactive).each do |network_name|
-            libvirt_network = libvirt_client.lookup_network_by_name(
-              network_name
-            )
+          driver.list_all_networks.each do |libvirt_network|
 
             # Parse ip address and netmask from the network xml description.
             xml = Nokogiri::XML(libvirt_network.xml_desc)
@@ -182,7 +180,7 @@ module VagrantPlugins
             network_address = (network_address(ip, netmask) if ip && netmask)
 
             libvirt_networks << {
-              name:             network_name,
+              name:             libvirt_network.name,
               ip_address:       ip,
               netmask:          netmask,
               network_address:  network_address,

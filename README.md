@@ -16,11 +16,19 @@ can help a lot :-)
 
 Vagrant-libvirt Documentation is published at [https://vagrant-libvirt.github.io/vagrant-libvirt/](https://vagrant-libvirt.github.io/vagrant-libvirt/)
 
+## QA status
+
+We periodically test basic functionality for vagrant-libvirt on various distributions.
+In the status badges below, build passing means that latest version of Vagrant + Vagrant-libvirt was installed correctly and `vagrant up` is working. Click the badge to review the action workflow.
+
+[![](http://github-actions.40ants.com/vagrant-libvirt/vagrant-libvirt-qa/matrix.svg?only=Distribution%20Install.verify-install)](https://github.com/vagrant-libvirt/vagrant-libvirt-qa/actions/workflows/distro-install.yml)
+
 ## Index
 
 <!-- vim-markdown-toc GFM -->
 
 * [Installing](#installing)
+  * [Latest development version](#latest-development-version)
 * [Running](#running)
 * [Development](#development)
 * [Contributing](#contributing)
@@ -31,6 +39,27 @@ Vagrant-libvirt Documentation is published at [https://vagrant-libvirt.github.io
 
 Installation typically involves a number of distribution package dependencies to ensure that Libvirt is available.
 Recommend that you follow the [installation guide](https://vagrant-libvirt.github.io/vagrant-libvirt/installation.html).
+
+### Latest development version
+
+If you want to try out the very latest development version you can download the gem package from the GitHub
+rubygems package [repository](https://github.com/vagrant-libvirt/vagrant-libvirt/packages/1659776) under the
+asserts. Unfortunately it's not yet possible to make the rubygem repositories in GitHub public.
+
+To install provide the file directly to the install command:
+```
+vagrant plugin install ./vagrant-libvirt-<version>.gem
+```
+
+It is possible to install directly from the GitHub rubygems package repository, however this will embedded
+your GitHub token directly into the file `~/.vagrant.d/plugins.json`:
+```
+vagrant plugin install vagrant-libvirt \
+  --plugin-source https://${USERNAME}:${GITHUB_TOKEN}@rubygems.pkg.github.com/vagrant-libvirt \
+  --plugin-version "0.10.9.pre.62"
+```
+
+Provided this token is a classic token limited to `read:packages` only, this may be acceptable to you.
 
 ## Running
 
@@ -75,20 +104,18 @@ To work on the `vagrant-libvirt` plugin, clone this repository out, and use
 ```shell
 git clone https://github.com/vagrant-libvirt/vagrant-libvirt.git
 cd vagrant-libvirt
+bundle config --local with development
+bundle config --local path 'vendor/bundle'
 bundle install
 ```
 
 Once you have the dependencies, verify the unit tests pass with `rspec`:
 
 ```shell
-export VAGRANT_HOME=$(mktemp -d)
 bundle exec rspec --fail-fast --color --format documentation
 ```
 
 If those pass, you're ready to start developing the plugin.
-
-Setting `VAGRANT_HOME` is to avoid issues with conflicting with other
-plugins/gems or data already present under `~/.vagrant.d`.
 
 Additionally if you wish to test against a specific version of vagrant you
 can control the version using the following before running the tests:
@@ -98,13 +125,23 @@ export VAGRANT_VERSION=v2.2.14
 bundle update && bundle exec rspec --fail-fast --color --format documentation
 ```
 
+To run the acceptance tests which involve bringing up VMs and exercising
+various functionality aspects run the following (warning, may have issues if
+distro ruby is newer than supported by vagrant):
+```shell
+bundle exec rspec --fail-fast --color --format documentation --tag acceptance
+```
+
 **Note** rvm is used by the maintainers to help provide an environment to test
 against multiple ruby versions that align with the ones used by vagrant for
 their embedded ruby depending on the release. You can see what version is used
 by looking at the current [unit tests](.github/workflows/unit-tests.yml)
 workflow. By default if you have rvm installed and enabled it this project looks
-to use ruby 2.6.6 and configures a separate gemset, both of which will be switched
-to each time you enter the project directory.
+to use ruby 3.1.2 and configures a separate gemset, both of which will be switched
+to each time you enter the project directory. It should be considered sufficient
+just to get any tests passing with your system ruby, and as long as you ensure
+that the option to allow maintainers can update your PR, we will fix up any
+issues with the remaining combinations.
 
 You can test the plugin without installing it into your Vagrant environment by
 just creating a `Vagrantfile` in the top level of this directory (it is
@@ -132,7 +169,7 @@ end
 Now you can use bundler to execute Vagrant:
 
 ```shell
-$ bundle exec vagrant up --provider=libvirt
+bundle exec vagrant up --provider=libvirt
 ```
 
 **IMPORTANT NOTE:** bundle is crucial. You need to use bundled Vagrant.
