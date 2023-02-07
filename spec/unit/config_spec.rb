@@ -1,9 +1,7 @@
 # frozen_string_literal: true
 
-require 'support/binding_proc'
-
-require 'spec_helper'
-require 'support/sharedcontext'
+require_relative '../spec_helper'
+require_relative '../support/binding_proc'
 
 require 'vagrant-libvirt/config'
 
@@ -88,7 +86,7 @@ describe VagrantPlugins::ProviderLibvirt::Config do
         ],
         [ # connect explicit to unix socket
           {:uri => "qemu+unix:///system"},
-          {:uri => "qemu+unix:///system", :connect_via_ssh => false, :host => nil, :username => nil},
+          {:uri => "qemu+unix:///system", :connect_via_ssh => false, :host => "", :username => nil},
         ],
         [ # via libssh2 should enable ssh as well
           {:uri => "qemu+libssh2://user@remote/system?known_hosts=/home/user/.ssh/known_hosts"},
@@ -141,7 +139,7 @@ describe VagrantPlugins::ProviderLibvirt::Config do
         ],
         [ # with session and using ssh infer connect by ssh and ignore host as not provided
           {},
-          {:uri => "qemu+ssh:///session", :qemu_use_session => true, :connect_via_ssh => true, :host => nil},
+          {:uri => "qemu+ssh:///session", :qemu_use_session => true, :connect_via_ssh => true, :host => ""},
           {
             :env => {'LIBVIRT_DEFAULT_URI' => "qemu+ssh:///session"},
           }
@@ -559,6 +557,19 @@ describe VagrantPlugins::ProviderLibvirt::Config do
           expect(subject.channels).to match([a_hash_including({:target_name => 'org.qemu.guest_agent.0'})])
         end
 
+        context 'another channel type already defined' do
+          it 'should inject a qemu agent channel' do
+            subject.channel :type => 'spicevmc', :target_name => 'com.redhat.spice.0', :target_type => 'virtio'
+            subject.finalize!
+
+            expect(subject.channels).to_not be_empty
+            expect(subject.channels).to match([
+              a_hash_including({:target_name => 'com.redhat.spice.0'}),
+              a_hash_including({:target_name => 'org.qemu.guest_agent.0'}),
+            ])
+          end
+        end
+
         context 'when agent channel already added' do
           it 'should not modify the channels' do
             subject.channel :type => 'unix', :target_name => 'org.qemu.guest_agent.0', :target_type => 'virtio'
@@ -568,7 +579,7 @@ describe VagrantPlugins::ProviderLibvirt::Config do
             expect(subject.channels.length).to eq(1)
           end
 
-          context 'when agent channel explicitly disbaled' do
+          context 'when agent channel explicitly disabled' do
             it 'should not include an agent channel' do
               subject.channel :type => 'unix', :target_name => 'org.qemu.guest_agent.0', :disabled => true
 
@@ -579,6 +590,144 @@ describe VagrantPlugins::ProviderLibvirt::Config do
           end
         end
       end
+
+      context 'when graphics type set to spice' do
+        before do
+          subject.graphics_type = 'spice'
+        end
+
+        it 'should inject a spice agent channel' do
+          subject.finalize!
+
+          expect(subject.channels).to_not be_empty
+          expect(subject.channels).to match([a_hash_including({:target_name => 'com.redhat.spice.0'})])
+        end
+
+        context 'another channel type already defined' do
+          it 'should inject a spice agent channel' do
+            subject.channel :type => 'unix', :target_name => 'org.qemu.guest_agent.0', :target_type => 'virtio'
+            subject.finalize!
+
+            expect(subject.channels).to_not be_empty
+            expect(subject.channels).to match([
+              a_hash_including({:target_name => 'org.qemu.guest_agent.0'}),
+              a_hash_including({:target_name => 'com.redhat.spice.0'}),
+            ])
+          end
+        end
+
+        context 'when spice channel already added' do
+          it 'should not modify the channels' do
+            subject.channel :type => 'spicevmc', :target_name => 'com.redhat.spice.0', :target_type => 'virtio'
+
+            subject.finalize!
+
+            expect(subject.channels.length).to eq(1)
+          end
+
+          context 'when agent channel explicitly disabled' do
+            it 'should not include an agent channel' do
+              subject.channel :type => 'spicevmc', :target_name => 'com.redhat.spice.0', :disabled => true
+
+              subject.finalize!
+
+              expect(subject.channels).to be_empty
+            end
+          end
+        end
+      end
+    end
+
+    context '@inputs' do
+      it 'should contain ps/2 mouse by default' do
+        subject.finalize!
+
+        expect(subject.inputs).to eq([{:bus=>"ps2", :type=>"mouse"}])
+      end
+
+      it 'should contain only the specific entries' do
+        subject.input :type => "keyboard", :bus => "usb"
+
+        subject.finalize!
+
+        expect(subject.inputs).to eq([{:bus=>"usb", :type=>"keyboard"}])
+      end
+    end
+
+    context '@graphics_* and @video_*' do
+      it 'should set reasonable defaults' do
+        subject.finalize!
+
+        expect(subject.graphics_type).to eq('vnc')
+        expect(subject.graphics_port).to eq(-1)
+        expect(subject.graphics_websocket).to eq(-1)
+        expect(subject.graphics_ip).to eq('127.0.0.1')
+        expect(subject.graphics_autoport).to eq('yes')
+        expect(subject.channels).to be_empty
+      end
+
+      it 'should handle graphics_type set to spice' do
+        subject.graphics_type = 'spice'
+        subject.finalize!
+
+        expect(subject.graphics_port).to eq(nil)
+        expect(subject.graphics_websocket).to eq(nil)
+        expect(subject.graphics_ip).to eq(nil)
+        expect(subject.graphics_autoport).to eq(nil)
+        expect(subject.channels).to match([a_hash_including({:target_name => 'com.redhat.spice.0'})])
+      end
+    end
+
+    context '@machine_arch and @cpu_*' do
+      context 'should set @cpu_mode based on @machine_arch support' do
+        # it's possible when this is unset that the host arch should be read
+        it 'should default to host-model if machine_arch unset' do
+          subject.finalize!
+
+          expect(subject.cpu_mode).to eq('host-model')
+        end
+
+        it 'should default to host-model if supported' do
+          subject.machine_arch = 'aarch64'
+
+          subject.finalize!
+
+          expect(subject.cpu_mode).to eq('host-model')
+        end
+
+        it 'should default to nil if unsupported' do
+          subject.machine_arch = 'ppc'
+
+          subject.finalize!
+
+          expect(subject.cpu_mode).to be_nil
+        end
+      end
+    end
+  end
+
+  describe '#launchsecurity' do
+    it 'should reject invalid type' do
+      expect { subject.launchsecurity(:type => 'bad') }.to raise_error("Launch security type only supports SEV. Explicitly set 'sev' as a type")
+    end
+
+    it 'should save when valid' do
+      expect(subject.launchsecurity(:type => 'sev', :cbitpos => 47, :reducedPhysBits => 1, :policy => "0x0003")).to be_truthy
+    end
+  end
+
+  describe '#memtune' do
+    it 'should raise an exception without type' do
+      expect { subject.memtune(:value => 250000) }.to raise_error('Missing memtune type')
+    end
+
+    it 'should raise an exception if type unrecognized' do
+      expect { subject.memtune(:type => 'limit', :value => 250000) }.to raise_error('Memtune type \'limit\' not allowed (hard_limit, soft_limit, swap_hard_limit are allowed)')
+    end
+
+    it 'should accept multiple calls' do
+      expect(subject.memtune(:type => 'hard_limit', :value => 250000)).to be_truthy
+      expect(subject.memtune(:type => 'soft_limit', :value => 200000)).to be_truthy
     end
   end
 
@@ -592,7 +741,7 @@ describe VagrantPlugins::ProviderLibvirt::Config do
   def assert_valid
     subject.finalize!
     errors = subject.validate(machine).values.first
-    expect(errors).to be_empty
+    expect(errors).to be_empty, lambda { "received errors unexpectedly: #{errors}" }
   end
 
   describe '#validate' do
@@ -619,8 +768,11 @@ describe VagrantPlugins::ProviderLibvirt::Config do
 
     context 'with mac defined' do
       let (:vm) { double('vm') }
+      let(:box) { instance_double(::Vagrant::Box) }
+
       before do
         machine.config.instance_variable_get("@keys")[:vm] = vm
+        allow(vm).to receive(:box).and_return(box)
       end
 
       it 'is valid with valid mac' do
@@ -632,7 +784,7 @@ describe VagrantPlugins::ProviderLibvirt::Config do
         network = [:public, { mac: 'aabbccddeeff' }]
         expect(vm).to receive(:networks).and_return([network])
         assert_valid
-        expect(network[1][:mac]).to eql('aa:bb:cc:dd:ee:ff')
+        expect(network[1][:mac]).to eql('aabbccddeeff')
       end
 
       it 'should be invalid if MAC not formatted correctly' do
@@ -644,23 +796,16 @@ describe VagrantPlugins::ProviderLibvirt::Config do
     context 'with public_network defined' do
       let(:libvirt_client)  { instance_double(::Libvirt::Connect) }
       let(:host_devices) { [
-        instance_double(Libvirt::Interface),
-        instance_double(Libvirt::Interface),
-      ] }
-      let(:libvirt_networks) { [
-        instance_double(Libvirt::Network),
-        instance_double(Libvirt::Network),
+        'lo',
+        'eth0',
+        'virbr0',
       ] }
       let(:driver) { instance_double(::VagrantPlugins::ProviderLibvirt::Driver) }
+      let(:device_name) { 'eth0' }
       before do
-        machine.config.vm.network :public_network, dev: 'eth0', ip: "192.168.2.157"
+        machine.config.vm.network :public_network, dev: device_name, ip: "192.168.2.157"
         allow(machine.provider).to receive(:driver).and_return(driver)
-        expect(driver).to receive(:list_host_devices).and_return(host_devices)
-        expect(driver).to receive(:list_networks).and_return(libvirt_networks)
-        expect(host_devices[0]).to receive(:name).and_return('eth0')
-        expect(host_devices[1]).to receive(:name).and_return('virbr0')
-        expect(libvirt_networks[0]).to receive(:bridge_name).and_return('')
-        expect(libvirt_networks[1]).to receive(:bridge_name).and_return('virbr0')
+        expect(driver).to receive(:host_devices).and_return(host_devices).at_least(:once).times
       end
 
       it 'should validate use of existing device' do
@@ -668,9 +813,7 @@ describe VagrantPlugins::ProviderLibvirt::Config do
       end
 
       context 'when default device not on host' do
-        before do
-          machine.config.vm.network :public_network, dev: 'eno1', ip: "192.168.2.157"
-        end
+        let(:device_name) { 'eno1' }
 
         it 'should be invalid' do
           assert_invalid
@@ -678,9 +821,7 @@ describe VagrantPlugins::ProviderLibvirt::Config do
       end
 
       context 'when using excluded host device' do
-        before do
-          machine.config.vm.network :public_network, dev: 'virbr0', ip: "192.168.2.157"
-        end
+        let(:device_name) { 'virbr0' }
 
         it 'should be invalid' do
           assert_invalid
@@ -693,6 +834,27 @@ describe VagrantPlugins::ProviderLibvirt::Config do
 
           it 'should validate' do
             assert_valid
+          end
+        end
+      end
+
+      context 'when setting iface_name' do
+        let(:iface_name) { 'myvnet1' }
+
+        before do
+          machine.config.vm.network :public_network, libvirt__iface_name: iface_name, ip: "192.168.2.157"
+        end
+
+        it 'should valididate' do
+          assert_valid
+        end
+
+        context 'when set to reserved value' do
+          let(:iface_name) { 'vnet1' }
+
+          it 'should be invalid' do
+            errors = assert_invalid
+            expect(errors).to include(match(/network configuration for machine test with setting :libvirt__iface_name => '#{iface_name}' starts/))
           end
         end
       end
@@ -716,18 +878,56 @@ describe VagrantPlugins::ProviderLibvirt::Config do
       end
     end
 
-    context 'with cpu_mode and cpu_model defined' do
-      it 'should discard model if mode is passthrough' do
+    context '@machine_arch and @cpu_*' do
+      it 'should be valid if cpu_* settings and no arch set' do
         subject.cpu_mode = 'host-passthrough'
-        subject.cpu_model = 'qemu64'
+        subject.nested = true
+
         assert_valid
-        expect(subject.cpu_model).to be_empty
       end
 
-      it 'should allow custom mode with model' do
-        subject.cpu_mode = 'custom'
-        subject.cpu_model = 'qemu64'
+      it 'should be valid if cpu_* settings and supported' do
+        subject.machine_arch = 'aarch64'
+        subject.cpu_mode = 'host-passthrough'
+        subject.nested = true
+
         assert_valid
+      end
+
+      it 'should flag settings invalid if unsupported' do
+        subject.machine_arch = 'ppc'
+        subject.cpu_mode = 'host-passthrough'
+        subject.nested = true
+
+        errors = assert_invalid
+        expect(errors).to include(match(/Architecture ppc does not support .* cpu_mode, nested/))
+      end
+    end
+
+    context 'with cpu_mode defined' do
+      before do
+        subject.cpu_mode = 'host-passthrough'
+      end
+
+      context 'with cpu_model defined' do
+        it 'should discard model if mode is passthrough' do
+          subject.cpu_model = 'qemu64'
+          assert_valid
+          expect(subject.cpu_model).to be_empty
+        end
+
+        it 'should allow custom mode with model' do
+          subject.cpu_mode = 'custom'
+          subject.cpu_model = 'qemu64'
+          assert_valid
+        end
+      end
+
+      context 'with cpu_model not defined' do
+        it 'should reject if cpu features enabled' do
+          subject.cpu_features = [{:name => 'feature', :policy => 'optional'}]
+          assert_invalid
+        end
       end
     end
 
@@ -784,6 +984,113 @@ describe VagrantPlugins::ProviderLibvirt::Config do
         end
       end
     end
+
+    context 'with cdroms and floppies' do
+      it 'should be invalid if too many cdroms' do
+        subject.storage :file, :device => :cdrom
+        subject.storage :file, :device => :cdrom
+        subject.storage :file, :device => :cdrom
+        subject.storage :file, :device => :cdrom
+        subject.storage :file, :device => :cdrom
+
+        expect{ subject.finalize! }.to raise_error('Only four cdroms may be attached at a time')
+      end
+
+      it 'sould be invalid if too many floppies' do
+        subject.storage :file, :device => :floppy
+        subject.storage :file, :device => :floppy
+        subject.storage :file, :device => :floppy
+
+        expect{ subject.finalize! }.to raise_error('Only two floppies may be attached at a time')
+      end
+    end
+
+    context 'with synced_folders' do
+      let(:vagrantfile) do
+        <<-EOF
+        Vagrant.configure('2') do |config|
+          config.vm.box = "vagrant-libvirt/test"
+          config.vm.define :test
+
+          config.vm.synced_folder "/path/to/share", "/srv", type: "#{type}"
+        end
+        EOF
+      end
+      let(:driver) { instance_double(::VagrantPlugins::ProviderLibvirt::Driver) }
+      let(:host_devices) { [
+        'lo',
+        'eth0',
+        'virbr0',
+      ] }
+
+      before do
+        allow(machine.provider).to receive(:driver).and_return(driver)
+        allow(driver).to receive_message_chain('connection.client.libversion').and_return(6_002_000)
+        allow(driver).to receive(:host_devices).and_return(host_devices)
+      end
+
+      context 'when type is 9p' do
+        let(:type) { "9p" }
+
+        context 'when using qemu:///session' do
+          before do
+            subject.qemu_use_session = true
+          end
+
+          it 'should validate if user can read host path' do
+            expect(File).to receive(:readable?).with('/path/to/share').and_return(true)
+
+            assert_valid
+          end
+
+          it 'should reject if user does not have read access to host path' do
+            expect(File).to receive(:readable?).with('/path/to/share').and_return(false)
+
+            assert_invalid
+          end
+        end
+
+        context 'when using qemu:///system' do
+          before do
+            subject.qemu_use_session = false
+          end
+
+          it 'should validate without checking if user has read access to host path' do
+            expect(File).to_not receive(:readable?)
+
+            assert_valid
+          end
+        end
+      end
+
+      context 'when type is virtiofs' do
+        let(:type) { "virtiofs" }
+
+        context 'when using qemu:///session' do
+          before do
+            subject.qemu_use_session = true
+          end
+
+          it 'should warn that it may not be supported' do
+            expect(ui).to receive(:warn).with(/Note: qemu session may not support virtiofs for synced_folders.*/)
+
+            assert_valid
+          end
+        end
+
+        context 'when using qemu:///system' do
+          before do
+            subject.qemu_use_session = false
+          end
+
+          it 'should not emit a warning message' do
+            expect(ui).to_not receive(:warn)
+
+            assert_valid
+          end
+        end
+      end
+    end
   end
 
   describe '#merge' do
@@ -791,6 +1098,27 @@ describe VagrantPlugins::ProviderLibvirt::Config do
     let(:two) { described_class.new }
 
     subject { one.merge(two) }
+
+    context 'memtunes' do
+      it 'should merge where type is different' do
+        one.memtune(type: 'hard_limit', value: '250000')
+        two.memtune(type: 'soft_limit', value: '200000')
+        subject.finalize!
+        expect(subject.memtunes).to eq({
+          'hard_limit' => {value: '250000', config: {unit: 'KiB'}},
+          'soft_limit' => {value: '200000', config: {unit: 'KiB'}},
+        })
+      end
+
+      it 'should override where type is the same' do
+        one.memtune(type: 'hard_limit', value: '250000')
+        two.memtune(type: 'hard_limit', value: '200000')
+        subject.finalize!
+        expect(subject.memtunes).to eq({
+          'hard_limit' => {value: '200000', config: {unit: 'KiB'}},
+        })
+      end
+    end
 
     context 'storage' do
       context 'with disks' do
@@ -833,6 +1161,28 @@ describe VagrantPlugins::ProviderLibvirt::Config do
             subject.finalize!
             expect(subject.cdroms).to include(include(dev: 'hda'),
                                               include(dev: 'hdb'))
+          end
+        end
+      end
+
+      context 'with floppies only' do
+        context 'assigned specific devs' do
+          it 'should merge floppies with specific devices' do
+            one.storage(:file, device: :floppy, dev: 'fda')
+            two.storage(:file, device: :floppy, dev: 'fdb')
+            subject.finalize!
+            expect(subject.floppies).to include(include(dev: 'fda'),
+                                                include(dev: 'fdb'))
+          end
+        end
+
+        context 'without devs given' do
+          it 'should merge floppies with different devs assigned automatically' do
+            one.storage(:file, device: :floppy)
+            two.storage(:file, device: :floppy)
+            subject.finalize!
+            expect(subject.floppies).to include(include(dev: 'fda'),
+                                                include(dev: 'fdb'))
           end
         end
       end
@@ -885,6 +1235,23 @@ describe VagrantPlugins::ProviderLibvirt::Config do
 
         subject.finalize!
         expect(subject.boot_order).to eq(['hd', 'cdrom'])
+      end
+    end
+
+    context 'inputs' do
+      it 'should merge' do
+        one.input :type => "tablet", :bus => "usb"
+        two.input :type => "keyboard", :bus => "usb"
+
+        subject.finalize!
+        expect(subject.inputs).to eq([{:type => "tablet", :bus => "usb"}, {:type => "keyboard", :bus => "usb"}])
+      end
+
+      it 'should respect explicit blanking' do
+        one.inputs = []
+
+        subject.finalize!
+        expect(subject.inputs).to eq([])
       end
     end
   end

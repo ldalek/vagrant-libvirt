@@ -3,13 +3,18 @@
 require 'cgi'
 
 require 'vagrant'
+require 'vagrant/action/builtin/mixin_synced_folders'
 
 require 'vagrant-libvirt/errors'
 require 'vagrant-libvirt/util/resolvers'
+require 'vagrant-libvirt/util/network_util'
 
 module VagrantPlugins
   module ProviderLibvirt
     class Config < Vagrant.plugin('2', :config)
+      include Vagrant::Action::Builtin::MixinSyncedFolders
+      include VagrantPlugins::ProviderLibvirt::Util::NetworkUtil
+
       # manually specify URI
       # will supersede most other options if provided
       attr_accessor :uri
@@ -19,6 +24,7 @@ module VagrantPlugins
 
       # The name of the server, where Libvirtd is running.
       attr_accessor :host
+      attr_accessor :port
 
       # If use ssh tunnel to connect to Libvirt.
       attr_accessor :connect_via_ssh
@@ -63,6 +69,8 @@ module VagrantPlugins
       attr_accessor :management_network_domain
       attr_accessor :management_network_mtu
       attr_accessor :management_network_keep
+      attr_accessor :management_network_driver_iommu
+      attr_accessor :management_network_model_type
 
       # System connection information
       attr_accessor :system_uri
@@ -77,6 +85,7 @@ module VagrantPlugins
       attr_accessor :memory
       attr_accessor :nodeset
       attr_accessor :memory_backing
+      attr_accessor :memtunes
       attr_accessor :channel
       attr_accessor :cpus
       attr_accessor :cpuset
@@ -85,11 +94,17 @@ module VagrantPlugins
       attr_accessor :cpu_fallback
       attr_accessor :cpu_features
       attr_accessor :cpu_topology
+      attr_accessor :cpu_affinity
       attr_accessor :shares
       attr_accessor :features
       attr_accessor :features_hyperv
+      attr_accessor :clock_absolute
+      attr_accessor :clock_adjustment
+      attr_accessor :clock_basis
       attr_accessor :clock_offset
+      attr_accessor :clock_timezone
       attr_accessor :clock_timers
+      attr_accessor :launchsecurity_data
       attr_accessor :numa_nodes
       attr_accessor :loader
       attr_accessor :nvram
@@ -99,6 +114,7 @@ module VagrantPlugins
       attr_accessor :machine_virtual_size
       attr_accessor :disk_bus
       attr_accessor :disk_device
+      attr_accessor :disk_address_type
       attr_accessor :disk_controller_model
       attr_accessor :disk_driver_opts
       attr_accessor :nic_model_type
@@ -112,6 +128,7 @@ module VagrantPlugins
       attr_accessor :graphics_type
       attr_accessor :graphics_autoport
       attr_accessor :graphics_port
+      attr_accessor :graphics_websocket
       attr_accessor :graphics_passwd
       attr_accessor :graphics_ip
       attr_accessor :graphics_gl
@@ -146,6 +163,7 @@ module VagrantPlugins
       # Storage
       attr_accessor :disks
       attr_accessor :cdroms
+      attr_accessor :floppies
 
       # Inputs
       attr_accessor :inputs
@@ -202,7 +220,17 @@ module VagrantPlugins
       # internal helper attributes
       attr_accessor :host_device_exclude_prefixes
 
+      # list of architectures that support cpu based on https://github.com/libvirt/libvirt/tree/master/src/cpu
+      ARCH_SUPPORT_CPU = [
+        'aarch64', 'armv6l', 'armv7b', 'armv7l',
+        'i686', 'x86_64',
+        'ppc64', 'ppc64le',
+        's390', 's390x',
+      ]
+
       def initialize
+        @logger = Log4r::Logger.new("vagrant_libvirt::config")
+
         @uri               = UNSET_VALUE
         @driver            = UNSET_VALUE
         @host              = UNSET_VALUE
@@ -229,6 +257,8 @@ module VagrantPlugins
         @management_network_domain = UNSET_VALUE
         @management_network_mtu = UNSET_VALUE
         @management_network_keep = UNSET_VALUE
+        @management_network_driver_iommu = UNSET_VALUE
+        @management_network_model_type = UNSET_VALUE
 
         # System connection information
         @system_uri      = UNSET_VALUE
@@ -240,6 +270,7 @@ module VagrantPlugins
         @memory            = UNSET_VALUE
         @nodeset           = UNSET_VALUE
         @memory_backing    = UNSET_VALUE
+        @memtunes          = {}
         @cpus              = UNSET_VALUE
         @cpuset            = UNSET_VALUE
         @cpu_mode          = UNSET_VALUE
@@ -247,11 +278,17 @@ module VagrantPlugins
         @cpu_fallback      = UNSET_VALUE
         @cpu_features      = UNSET_VALUE
         @cpu_topology      = UNSET_VALUE
+        @cpu_affinity      = UNSET_VALUE
         @shares            = UNSET_VALUE
         @features          = UNSET_VALUE
         @features_hyperv   = UNSET_VALUE
+        @clock_absolute    = UNSET_VALUE
+        @clock_adjustment  = UNSET_VALUE
+        @clock_basis       = UNSET_VALUE
         @clock_offset      = UNSET_VALUE
+        @clock_timezone    = UNSET_VALUE
         @clock_timers      = []
+        @launchsecurity_data = UNSET_VALUE
         @numa_nodes        = UNSET_VALUE
         @loader            = UNSET_VALUE
         @nvram             = UNSET_VALUE
@@ -260,6 +297,7 @@ module VagrantPlugins
         @machine_virtual_size = UNSET_VALUE
         @disk_bus          = UNSET_VALUE
         @disk_device       = UNSET_VALUE
+        @disk_address_type = UNSET_VALUE
         @disk_controller_model = UNSET_VALUE
         @disk_driver_opts  = {}
         @nic_model_type    = UNSET_VALUE
@@ -273,6 +311,7 @@ module VagrantPlugins
         @graphics_type     = UNSET_VALUE
         @graphics_autoport = UNSET_VALUE
         @graphics_port     = UNSET_VALUE
+        @graphics_websocket = UNSET_VALUE
         @graphics_ip       = UNSET_VALUE
         @graphics_passwd   = UNSET_VALUE
         @graphics_gl       = UNSET_VALUE
@@ -302,6 +341,7 @@ module VagrantPlugins
         # Storage
         @disks             = []
         @cdroms            = []
+        @floppies          = []
 
         # Inputs
         @inputs            = UNSET_VALUE
@@ -377,6 +417,25 @@ module VagrantPlugins
 
         # is it better to raise our own error, or let Libvirt cause the exception?
         raise 'Only four cdroms may be attached at a time'
+      end
+
+
+      def _get_floppy_dev(floppies)
+        exist = Hash[floppies.collect { |x| [x[:dev], true] }]
+        # fda - fdb
+        curr = 'a'.ord
+        while curr <= 'b'.ord
+          dev = "fd#{curr.chr}"
+          if exist[dev]
+            curr += 1
+            next
+          else
+            return dev
+          end
+        end
+
+        # is it better to raise our own error, or let Libvirt cause the exception?
+        raise 'Only two floppies may be attached at a time'
       end
 
       def _generate_numa
@@ -468,6 +527,16 @@ module VagrantPlugins
         @cpu_topology[:threads] = options[:threads]
       end
 
+      def cpuaffinitiy(affinity = {})
+        if @cpu_affinity == UNSET_VALUE
+          @cpu_affinity = {}
+        end
+
+        affinity.each do |vcpu, cpuset|
+          @cpu_affinity[vcpu] = cpuset
+        end
+      end
+
       def memorybacking(option, config = {})
         case option
         when :source
@@ -481,6 +550,37 @@ module VagrantPlugins
         @memory_backing = [] if @memory_backing == UNSET_VALUE
         @memory_backing.push(name: option,
                              config: config)
+      end
+
+      def memtune(config={})
+        if config[:type].nil?
+          raise "Missing memtune type"
+        end
+
+        unless ['hard_limit', 'soft_limit', 'swap_hard_limit'].include? config[:type]
+          raise "Memtune type '#{config[:type]}' not allowed (hard_limit, soft_limit, swap_hard_limit are allowed)"
+        end
+
+        if config[:value].nil?
+          raise "Missing memtune value"
+        end
+
+        opts = config[:options] || {}
+        opts[:unit] = opts[:unit] || "KiB"
+
+        @memtunes[config[:type]] = { value: config[:value], config: opts }
+      end
+
+      def launchsecurity(options = {})
+        if options.fetch(:type) != 'sev'
+          raise "Launch security type only supports SEV. Explicitly set 'sev' as a type"
+        end
+
+        @launchsecurity_data = {}
+        @launchsecurity_data[:type] = options[:type]
+        @launchsecurity_data[:cbitpos] = options[:cbitpos] || 47
+        @launchsecurity_data[:reducedPhysBits] = options[:reducedPhysBits] || 1
+        @launchsecurity_data[:policy] = options[:policy] || "0x0003"
       end
 
       def input(options = {})
@@ -641,8 +741,11 @@ module VagrantPlugins
       # NOTE: this will run twice for each time it's needed- keep it idempotent
       def storage(storage_type, options = {})
         if storage_type == :file
-          if options[:device] == :cdrom
+          case options[:device]
+          when :cdrom
             _handle_cdrom_storage(options)
+          when :floppy
+            _handle_floppy_storage(options)
           else
             _handle_disk_storage(options)
           end
@@ -676,6 +779,28 @@ module VagrantPlugins
         @cdroms << cdrom
       end
 
+      def _handle_floppy_storage(options = {})
+        # <disk type='file' device='floppy'>
+        # <source file='/var/lib/libvirt/images/floppy.vfd'/>
+        # <target dev='fda' bus='fdc'/>
+        # </disk>
+        #
+        # note the target dev will need to be changed with each floppy drive (fda or fdb)
+
+        options = {
+          bus: 'fdc',
+          path: nil
+        }.merge(options)
+
+        floppy = {
+          dev: options[:dev],
+          bus: options[:bus],
+          path: options[:path]
+        }
+
+        @floppies << floppy
+      end
+
       def _handle_disk_storage(options = {})
         options = {
           type: 'qcow2',
@@ -687,6 +812,7 @@ module VagrantPlugins
         disk = {
           device: options[:device],
           type: options[:type],
+          address_type: options[:address_type],
           size: options[:size],
           path: options[:path],
           bus: options[:bus],
@@ -846,17 +972,30 @@ module VagrantPlugins
         @management_network_domain = nil if @management_network_domain == UNSET_VALUE
         @management_network_mtu = nil if @management_network_mtu == UNSET_VALUE
         @management_network_keep = false if @management_network_keep == UNSET_VALUE
+        @management_network_driver_iommu = false if @management_network_driver_iommu == UNSET_VALUE
+        @management_network_model_type = 'virtio' if @management_network_model_type == UNSET_VALUE
 
         # Domain specific settings.
         @title = '' if @title == UNSET_VALUE
         @description = '' if @description == UNSET_VALUE
         @uuid = '' if @uuid == UNSET_VALUE
+        @machine_type = nil if @machine_type == UNSET_VALUE
+        @machine_arch = nil if @machine_arch == UNSET_VALUE
         @memory = 512 if @memory == UNSET_VALUE
         @nodeset = nil if @nodeset == UNSET_VALUE
         @memory_backing = [] if @memory_backing == UNSET_VALUE
         @cpus = 1 if @cpus == UNSET_VALUE
         @cpuset = nil if @cpuset == UNSET_VALUE
-        @cpu_mode = 'host-model' if @cpu_mode == UNSET_VALUE
+        @cpu_mode = if @cpu_mode == UNSET_VALUE
+                      # only some architectures support the cpu element
+                      if @machine_arch.nil? || ARCH_SUPPORT_CPU.include?(@machine_arch.downcase)
+                        'host-model'
+                      else
+                        nil
+                      end
+                    else
+                      @cpu_mode
+                    end
         @cpu_model = if (@cpu_model == UNSET_VALUE) && (@cpu_mode == 'custom')
                        'qemu64'
                      elsif @cpu_mode != 'custom'
@@ -865,18 +1004,22 @@ module VagrantPlugins
                        @cpu_model
           end
         @cpu_topology = {} if @cpu_topology == UNSET_VALUE
+        @cpu_affinity = {} if @cpu_affinity == UNSET_VALUE
         @cpu_fallback = 'allow' if @cpu_fallback == UNSET_VALUE
         @cpu_features = [] if @cpu_features == UNSET_VALUE
         @shares = nil if @shares == UNSET_VALUE
         @features = ['acpi','apic','pae'] if @features == UNSET_VALUE
         @features_hyperv = [] if @features_hyperv == UNSET_VALUE
+        @clock_absolute = nil if @clock_absolute == UNSET_VALUE
+        @clock_adjustment = nil if @clock_adjustment == UNSET_VALUE
+        @clock_basis = 'utc' if @clock_basis == UNSET_VALUE
         @clock_offset = 'utc' if @clock_offset == UNSET_VALUE
+        @clock_timezone = nil if @clock_timezone == UNSET_VALUE
         @clock_timers = [] if @clock_timers == UNSET_VALUE
+        @launchsecurity_data = nil if @launchsecurity_data == UNSET_VALUE
         @numa_nodes = @numa_nodes == UNSET_VALUE ? nil : _generate_numa
         @loader = nil if @loader == UNSET_VALUE
         @nvram = nil if @nvram == UNSET_VALUE
-        @machine_type = nil if @machine_type == UNSET_VALUE
-        @machine_arch = nil if @machine_arch == UNSET_VALUE
         @machine_virtual_size = nil if @machine_virtual_size == UNSET_VALUE
         @disk_device = @disk_bus == 'scsi' ? 'sda' : 'vda' if @disk_device == UNSET_VALUE
         @disk_bus = @disk_device.start_with?('sd') ? 'scsi' : 'virtio' if @disk_bus == UNSET_VALUE
@@ -887,26 +1030,28 @@ module VagrantPlugins
             @disk_controller_model = nil
           end
         end
+        @disk_address_type = nil if @disk_address_type == UNSET_VALUE
         @disk_driver_opts = {} if @disk_driver_opts == UNSET_VALUE
         @nic_model_type = nil if @nic_model_type == UNSET_VALUE
         @nested = false if @nested == UNSET_VALUE
         @volume_cache = nil if @volume_cache == UNSET_VALUE
         @kernel = nil if @kernel == UNSET_VALUE
         @cmd_line = '' if @cmd_line == UNSET_VALUE
-        @initrd = '' if @initrd == UNSET_VALUE
+        @initrd = nil if @initrd == UNSET_VALUE
         @dtb = nil if @dtb == UNSET_VALUE
         @graphics_type = 'vnc' if @graphics_type == UNSET_VALUE
-        @graphics_autoport = @graphics_port == UNSET_VALUE ? 'yes' : nil
+        @graphics_autoport = @graphics_type != 'spice' && @graphics_port == UNSET_VALUE ? 'yes' : nil
         if (@graphics_type != 'vnc' && @graphics_type != 'spice') ||
            @graphics_passwd == UNSET_VALUE
           @graphics_passwd = nil
         end
-        @graphics_port = -1 if @graphics_port == UNSET_VALUE
-        @graphics_ip = '127.0.0.1' if @graphics_ip == UNSET_VALUE
-        @video_type = 'cirrus' if @video_type == UNSET_VALUE
-        @video_vram = 16384 if @video_vram == UNSET_VALUE
+        @graphics_port = @graphics_type == 'spice' ? nil : -1 if @graphics_port == UNSET_VALUE
+        @graphics_websocket = @graphics_type == 'spice' ? nil : -1 if @graphics_websocket == UNSET_VALUE
+        @graphics_ip = @graphics_type == 'spice' ? nil : '127.0.0.1' if @graphics_ip == UNSET_VALUE
         @video_accel3d = false if @video_accel3d == UNSET_VALUE
         @graphics_gl = @video_accel3d if @graphics_gl == UNSET_VALUE
+        @video_type = @video_accel3d ? 'virtio' : 'cirrus' if @video_type == UNSET_VALUE
+        @video_vram = 16384 if @video_vram == UNSET_VALUE
         @sound_type = nil if @sound_type == UNSET_VALUE
         @keymap = 'en-us' if @keymap == UNSET_VALUE
         @kvm_hidden = false if @kvm_hidden == UNSET_VALUE
@@ -933,17 +1078,25 @@ module VagrantPlugins
           cdrom[:dev] = _get_cdrom_dev(@cdroms) if cdrom[:dev].nil?
           cdrom
         end
+        @floppies = [] if @floppies == UNSET_VALUE
+        @floppies.map! do |floppy|
+          floppy[:dev] = _get_floppy_dev(@floppies) if floppy[:dev].nil?
+          floppy
+        end
 
         # Inputs
         @inputs = [{ type: 'mouse', bus: 'ps2' }] if @inputs == UNSET_VALUE
 
         # Channels
-        if @channels == UNSET_VALUE
-          @channels = []
-          if @qemu_use_agent == true
-            if @channels.all? { |channel| !channel.fetch(:target_name, '').start_with?('org.qemu.guest_agent.') }
-              channel(:type => 'unix', :target_name => 'org.qemu.guest_agent.0', :target_type => 'virtio')
-            end
+        @channels = [] if @channels == UNSET_VALUE
+        if @qemu_use_agent == true
+          if @channels.all? { |channel| !channel.fetch(:target_name, '').start_with?('org.qemu.guest_agent.') }
+            channel(:type => 'unix', :target_name => 'org.qemu.guest_agent.0', :target_type => 'virtio')
+          end
+        end
+        if @graphics_type == 'spice'
+          if @channels.all? { |channel| !channel.fetch(:target_name, '').start_with?('com.redhat.spice.') }
+            channel(:type => 'spicevmc', :target_name => 'com.redhat.spice.0', :target_type => 'virtio')
           end
         end
 
@@ -1000,9 +1153,29 @@ module VagrantPlugins
       def validate(machine)
         errors = _detected_errors
 
+        unless @machine_arch.nil? || ARCH_SUPPORT_CPU.include?(@machine_arch.downcase)
+          unsupported = [:cpu_mode, :cpu_model, :nested, :cpu_features, :cpu_topology, :numa_nodes]
+          cpu_support_required_by = unsupported.select { |x|
+            value = instance_variable_get("@#{x.to_s}")
+            next if value.nil?  # not set
+            is_bool = !!value == value
+            next if is_bool && !value  # boolean and set to false
+            next if !is_bool && value.empty?  # not boolean, but empty '', [], {}
+            true
+          }
+
+          unless cpu_support_required_by.empty?
+            errors << "Architecture #{@machine_arch} does not support /domain/cpu XML, which is required when setting the config options #{cpu_support_required_by.join(", ")}"
+          end
+        end
+
         # technically this shouldn't occur, but ensure that if somehow it does, it gets rejected.
         if @cpu_mode == 'host-passthrough' && @cpu_model != ''
           errors << "cannot set cpu_model with cpu_mode of 'host-passthrough'. leave model unset or switch mode."
+        end
+
+        unless @cpu_model != '' || @cpu_features.empty?
+          errors << "cannot set cpu_features with cpu_model unset, please set a model or skip setting features."
         end
 
         # The @uri and @qemu_use_session should not conflict
@@ -1052,26 +1225,7 @@ module VagrantPlugins
           errors << "#{e}"
         end
 
-        machine.config.vm.networks.each_with_index do |network, index|
-          type, opts = network
-
-          if opts[:mac]
-            if opts[:mac] =~ /\A([0-9a-fA-F]{12})\z/
-              opts[:mac] = opts[:mac].scan(/../).join(':')
-            end
-            unless opts[:mac] =~ /\A([0-9a-fA-F]{2}:){5}([0-9a-fA-F]{2})\z/
-              errors << "Configured NIC MAC '#{opts[:mac]}' is not in 'xx:xx:xx:xx:xx:xx' or 'xxxxxxxxxxxx' format"
-            end
-          end
-
-          # only interested in public networks where portgroup is nil, as then source will be a host device
-          if type == :public_network && opts[:portgroup] == nil
-            devices = host_devices(machine)
-            if !devices.include?(opts[:dev])
-              errors << "network configuration #{index} for machine #{machine.name} is a public_network referencing host device '#{opts[:dev]}' which does not exist, consider adding ':dev => ....' referencing one of #{devices.join(", ")}"
-            end
-          end
-        end
+        errors = validate_networks(machine, errors)
 
         if !machine.provider_config.volume_cache.nil? and machine.provider_config.volume_cache != UNSET_VALUE
           machine.ui.warn("Libvirt Provider: volume_cache is deprecated. Use disk_driver :cache => '#{machine.provider_config.volume_cache}' instead.")
@@ -1079,6 +1233,24 @@ module VagrantPlugins
           if !machine.provider_config.disk_driver_opts.empty?
             machine.ui.warn("Libvirt Provider: volume_cache has no effect when disk_driver is defined.")
           end
+        end
+
+        # if run via a session, then qemu will be run with user permissions, make sure the user
+        # has permissions to access the host paths otherwise there will be an error triggered
+        if machine.provider_config.qemu_use_session
+          synced_folders(machine).fetch(:"9p", []).each do |_, options|
+            unless File.readable?(options[:hostpath])
+              errors << "9p synced_folder cannot mount host path #{options[:hostpath]} into guest #{options[:guestpath]} when using qemu session as executing user does not have permissions to read the directory on the user."
+            end
+          end
+
+          unless synced_folders(machine)[:"virtiofs"].nil?
+            machine.ui.warn("Note: qemu session may not support virtiofs for synced_folders, use 9p or enable use of qemu:///system context unless you know what you are doing")
+          end
+        end
+
+        if [@clock_absolute, @clock_adjustment, @clock_timezone].count {|clock| !clock.nil?} > 1
+          errors << "At most, only one of [clock_absolute, clock_adjustment, clock_timezone] may be set."
         end
 
         errors = validate_sysinfo(machine, errors)
@@ -1098,7 +1270,15 @@ module VagrantPlugins
           c += other.cdroms
           result.cdroms = c
 
+          c = floppies.dup
+          c += other.floppies
+          result.floppies = c
+
+          result.memtunes = memtunes.merge(other.memtunes)
+
           result.disk_driver_opts = disk_driver_opts.merge(other.disk_driver_opts)
+
+          result.inputs = inputs != UNSET_VALUE ? inputs.dup + (other.inputs != UNSET_VALUE ? other.inputs : []) : other.inputs
 
           c = sysinfo == UNSET_VALUE ? {} : sysinfo.dup
           c.merge!(other.sysinfo) { |_k, x, y| x.respond_to?(:each_pair) ? x.merge(y) : x + y } if other.sysinfo != UNSET_VALUE
@@ -1143,8 +1323,8 @@ module VagrantPlugins
           end
         end
 
-        # Extract host values from uri if provided, otherwise nil
-        @host = uri.host
+        # Extract host values from uri if provided, otherwise set empty string
+        @host = uri.host || ""
         @port = uri.port
         # only override username if there is a value provided
         @username = nil if @username == UNSET_VALUE
@@ -1212,16 +1392,55 @@ module VagrantPlugins
         end
       end
 
-      def host_devices(machine)
-        @host_devices ||= begin
-          (
-            machine.provider.driver.list_host_devices.map { |iface| iface.name } +
-            machine.provider.driver.list_networks.map { |net| net.bridge_name }
-          ).uniq.select do |dev|
-            next if dev.empty?
-            dev != "lo" && !@host_device_exclude_prefixes.any? { |exclude| dev.start_with?(exclude) }
+      def validate_networks(machine, errors)
+        begin
+          networks = configured_networks(machine, @logger)
+        rescue Errors::VagrantLibvirtError => e
+          errors << "#{e}"
+
+          return
+        end
+
+        return if networks.empty?
+
+        networks.each_with_index do |network, index|
+          if network[:mac]
+            if network[:mac] =~ /\A([0-9a-fA-F]{12})\z/
+              network[:mac] = network[:mac].scan(/../).join(':')
+            end
+            unless network[:mac] =~ /\A([0-9a-fA-F]{2}:){5}([0-9a-fA-F]{2})\z/
+              errors << "Configured NIC MAC '#{network[:mac]}' is not in 'xx:xx:xx:xx:xx:xx' or 'xxxxxxxxxxxx' format"
+            end
+          end
+
+          # only interested in public networks where portgroup is nil, as then source will be a host device
+          if network[:iface_type] == :public_network && network[:portgroup] == nil
+            exclude_prefixes = @host_device_exclude_prefixes
+            # for qemu sessions the management network injected will be a public_network trying to use a libvirt managed device
+            if index == 0 and machine.provider_config.mgmt_attach and machine.provider_config.qemu_use_session == true
+              exclude_prefixes.delete('virbr')
+            end
+
+            devices = machine.provider.driver.host_devices.select do |dev|
+              next if dev.empty?
+              dev != "lo" && !exclude_prefixes.any? { |exclude| dev.start_with?(exclude) }
+            end
+            hostdev = network.fetch(:dev, 'eth0')
+
+            if !devices.include?(hostdev)
+              errors << "network configuration #{index} for machine #{machine.name} is a public_network referencing host device '#{hostdev}' which does not exist, consider adding ':dev => ....' referencing one of #{devices.join(", ")}"
+            end
+          end
+
+          unless network[:iface_name].nil?
+            restricted_devnames = ['vnet', 'vif', 'macvtap', 'macvlan']
+            if restricted_devnames.any? { |restricted| network[:iface_name].start_with?(restricted) }
+              errors << "network configuration for machine #{machine.name} with setting :libvirt__iface_name => '#{network[:iface_name]}' starts with a restricted prefix according to libvirt docs https://libvirt.org/formatdomain.html#overriding-the-target-element, please use a device name that does not start with one of #{restricted_devnames.join(", ")}"
+            end
           end
         end
+
+        errors
       end
 
       def validate_sysinfo(machine, errors)

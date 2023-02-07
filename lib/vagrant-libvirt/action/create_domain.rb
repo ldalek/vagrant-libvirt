@@ -32,11 +32,17 @@ module VagrantPlugins
           @cpuset = config.cpuset
           @cpu_features = config.cpu_features
           @cpu_topology = config.cpu_topology
+          @cpu_affinity = config.cpu_affinity
           @nodeset = config.nodeset
           @features = config.features
           @features_hyperv = config.features_hyperv
+          @clock_absolute = config.clock_absolute
+          @clock_adjustment = config.clock_adjustment
+          @clock_basis = config.clock_basis
           @clock_offset = config.clock_offset
+          @clock_timezone = config.clock_timezone
           @clock_timers = config.clock_timers
+          @launchsecurity_data = config.launchsecurity_data
           @shares = config.shares
           @cpu_mode = config.cpu_mode
           @cpu_model = config.cpu_model
@@ -48,9 +54,12 @@ module VagrantPlugins
           @machine_arch = config.machine_arch
           @disk_controller_model = config.disk_controller_model
           @disk_driver_opts = config.disk_driver_opts
+          @disk_address_type = config.disk_address_type
           @nested = config.nested
           @memory_size = config.memory.to_i * 1024
           @memory_backing = config.memory_backing
+          @memtunes = config.memtunes
+
           @management_network_mac = config.management_network_mac
           @domain_volume_cache = config.volume_cache || 'default'
           @kernel = config.kernel
@@ -61,6 +70,7 @@ module VagrantPlugins
           @graphics_type = config.graphics_type
           @graphics_autoport = config.graphics_autoport
           @graphics_port = config.graphics_port
+          @graphics_websocket = config.graphics_websocket
           @graphics_ip = config.graphics_ip
           @graphics_passwd = config.graphics_passwd
           @graphics_gl = config.graphics_gl
@@ -100,6 +110,7 @@ module VagrantPlugins
           @domain_volumes = env[:domain_volumes] || []
           @disks = env[:disks] || []
           @cdroms = config.cdroms
+          @floppies = config.floppies
 
           # Input
           @inputs = config.inputs
@@ -191,6 +202,8 @@ module VagrantPlugins
             dir = File.dirname(serial[:source][:path])
             begin
               FileUtils.mkdir_p(dir)
+              FileUtils.touch(serial[:source][:path])
+              File.truncate(serial[:source][:path], 0) unless serial[:source].fetch(:append, false)
             rescue ::Errno::EACCES
               raise Errors::SerialCannotCreatePathError,
                     path: dir
@@ -206,13 +219,16 @@ module VagrantPlugins
           env[:ui].info(" -- Domain type:       #{@domain_type}")
           env[:ui].info(" -- Cpus:              #{@cpus}")
           unless @cpuset.nil?
-            env[:ui].info(" -- Cpuset:            #{@cpuset}")
+            env[:ui].info("   -- Cpuset:          #{@cpuset}")
           end
           if not @cpu_topology.empty?
-            env[:ui].info(" -- CPU topology:   sockets=#{@cpu_topology[:sockets]}, cores=#{@cpu_topology[:cores]}, threads=#{@cpu_topology[:threads]}")
+            env[:ui].info(" -- CPU topology:      sockets=#{@cpu_topology[:sockets]}, cores=#{@cpu_topology[:cores]}, threads=#{@cpu_topology[:threads]}")
+          end
+          @cpu_affinity.each do |vcpu, cpuset|
+            env[:ui].info(" -- CPU affinity:      vcpu #{vcpu} => cpuset #{cpuset}")
           end
           @cpu_features.each do |cpu_feature|
-            env[:ui].info(" -- CPU Feature:       name=#{cpu_feature[:name]}, policy=#{cpu_feature[:policy]}")
+            env[:ui].info(" -- CPU feature:       name=#{cpu_feature[:name]}, policy=#{cpu_feature[:policy]}")
           end
           @features.each do |feature|
             env[:ui].info(" -- Feature:           #{feature}")
@@ -224,7 +240,15 @@ module VagrantPlugins
               env[:ui].info(" -- Feature (HyperV):  name=#{feature[:name]}, state=#{feature[:state]}")
             end
           end
-          env[:ui].info(" -- Clock offset:      #{@clock_offset}")
+          if not @clock_absolute.nil?
+            env[:ui].info(" -- Clock absolute:    #{@clock_absolute}")
+          elsif not @clock_adjustment.nil?
+            env[:ui].info(" -- Clock adjustment:  #{@clock_adjustment}")
+          elsif not @clock_timezone.nil?
+            env[:ui].info(" -- Clock timezone:    #{@clock_timezone}")
+          else
+            env[:ui].info(" -- Clock offset:      #{@clock_offset}")
+          end
           @clock_timers.each do |timer|
             env[:ui].info(" -- Clock timer:       #{timer.map { |k,v| "#{k}=#{v}"}.join(', ')}")
           end
@@ -235,12 +259,18 @@ module VagrantPlugins
           @memory_backing.each do |backing|
             env[:ui].info(" -- Memory Backing:    #{backing[:name]}: #{backing[:config].map { |k,v| "#{k}='#{v}'"}.join(' ')}")
           end
+
+          @memtunes.each do |type, options|
+            env[:ui].info(" -- Memory Tuning:     #{type}: #{options[:config].map { |k,v| "#{k}='#{v}'"}.join(' ')}, value: #{options[:value]}")
+          end
           unless @shares.nil?
             env[:ui].info(" -- Shares:            #{@shares}")
           end
-          env[:ui].info(" -- Management MAC:    #{@management_network_mac}")
-          env[:ui].info(" -- Loader:            #{@loader}")
-          env[:ui].info(" -- Nvram:             #{@nvram}")
+          env[:ui].info(" -- Management MAC:    #{@management_network_mac}") if @management_network_mac
+          env[:ui].info(" -- Kernel:            #{@kernel}") if @kernel
+          env[:ui].info(" -- Initrd:            #{@initrd}") if @initrd
+          env[:ui].info(" -- Loader:            #{@loader}") if @loader
+          env[:ui].info(" -- Nvram:             #{@nvram}") if @nvram
           if env[:machine].config.vm.box
             env[:ui].info(" -- Base box:          #{env[:machine].box.name}")
           end
@@ -255,23 +285,24 @@ module VagrantPlugins
             env[:ui].info(" -- Disk driver opts:  cache='#{@domain_volume_cache}'")
           end
 
-          env[:ui].info(" -- Kernel:            #{@kernel}")
-          env[:ui].info(" -- Initrd:            #{@initrd}")
           env[:ui].info(" -- Graphics Type:     #{@graphics_type}")
-          env[:ui].info(" -- Graphics Port:     #{@graphics_port}")
-          env[:ui].info(" -- Graphics IP:       #{@graphics_ip}")
-          env[:ui].info(" -- Graphics Password: #{@graphics_passwd.nil? ? 'Not defined' : 'Defined'}")
+          env[:ui].info(" -- Graphics Websocket: #{@graphics_websocket}") if @graphics_websocket != -1
+          if !@graphics_autoport
+            env[:ui].info(" -- Graphics Port:     #{@graphics_port}")
+            env[:ui].info(" -- Graphics IP:       #{@graphics_ip}")
+            env[:ui].info(" -- Graphics Password: #{@graphics_passwd.nil? ? 'Not defined' : 'Defined'}")
+          end
           env[:ui].info(" -- Video Type:        #{@video_type}")
           env[:ui].info(" -- Video VRAM:        #{@video_vram}")
           env[:ui].info(" -- Video 3D accel:    #{@video_accel3d}")
-          env[:ui].info(" -- Sound Type:        #{@sound_type}")
+          env[:ui].info(" -- Sound Type:        #{@sound_type}") if @sound_type
           env[:ui].info(" -- Keymap:            #{@keymap}")
           env[:ui].info(" -- TPM Backend:       #{@tpm_type}")
           if @tpm_type == 'emulator'
             env[:ui].info(" -- TPM Model:         #{@tpm_model}")
             env[:ui].info(" -- TPM Version:       #{@tpm_version}")
           else
-            env[:ui].info(" -- TPM Path:          #{@tpm_path}")
+            env[:ui].info(" -- TPM Path:          #{@tpm_path}") if @tpm_path
           end
 
           unless @sysinfo.empty?
@@ -300,12 +331,12 @@ module VagrantPlugins
             env[:ui].info(" -- Boot device:        #{device}")
           end
 
-          unless @disks.empty?
-            env[:ui].info(" -- Disks:         #{_disks_print(@disks)}")
+          if not @launchsecurity_data.nil?
+            env[:ui].info(" -- Launch security:   #{@launchsecurity_data.map { |k, v| "#{k.to_s}=#{v}" }.join(", ")}")
           end
 
           @disks.each do |disk|
-            msg = " -- Disk(#{disk[:device]}):     #{disk[:absolute_path]}"
+            msg = " -- Disk(#{disk[:device]}):         #{disk[:absolute_path]}, #{disk[:bus]}, #{disk[:size]}"
             msg += ' Shared' if disk[:shareable]
             msg += ' (Remove only manually)' if disk[:allow_existing]
             msg += ' Not created - using existed.' if disk[:preexisting]
@@ -318,6 +349,14 @@ module VagrantPlugins
 
           @cdroms.each do |cdrom|
             env[:ui].info(" -- CDROM(#{cdrom[:dev]}):        #{cdrom[:path]}")
+          end
+
+          unless @floppies.empty?
+            env[:ui].info(" -- Floppies:          #{_floppies_print(@floppies)}")
+          end
+
+          @floppies.each do |floppy|
+            env[:ui].info(" -- Floppy(#{floppy[:dev]}):      #{floppy[:path]}")
           end
 
           @inputs.each do |input|
@@ -428,14 +467,12 @@ module VagrantPlugins
         end
 
         private
-        def _disks_print(disks)
-          disks.collect do |x|
-            "#{x[:device]}(#{x[:type]}, #{x[:bus]}, #{x[:size]})"
-          end.join(', ')
-        end
-
         def _cdroms_print(cdroms)
           cdroms.collect { |x| x[:dev] }.join(', ')
+        end
+
+        def _floppies_print(floppies)
+          floppies.collect { |x| x[:dev] }.join(', ')
         end
       end
     end

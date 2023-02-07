@@ -1,7 +1,6 @@
 # frozen_string_literal: true
 
-require 'spec_helper'
-require 'support/sharedcontext'
+require_relative '../../spec_helper'
 
 require 'vagrant/action/runner'
 

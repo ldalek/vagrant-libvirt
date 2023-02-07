@@ -1,12 +1,10 @@
 # frozen_string_literal: true
 
-require 'spec_helper'
-require 'support/sharedcontext'
-require 'support/libvirt_context'
+require_relative '../../spec_helper'
 
 require 'fog/libvirt/models/compute/volume'
 
-require 'vagrant-libvirt/action/destroy_domain'
+require 'vagrant-libvirt/action/create_domain_volume'
 require 'vagrant-libvirt/util/byte_number'
 
 

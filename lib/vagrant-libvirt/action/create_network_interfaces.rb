@@ -4,6 +4,9 @@ require 'log4r'
 require 'vagrant/util/network_ip'
 require 'vagrant/util/scoped_hash_override'
 
+require 'vagrant-libvirt/util/erb_template'
+require 'vagrant-libvirt/util/network_util'
+
 module VagrantPlugins
   module ProviderLibvirt
     module Action
@@ -40,7 +43,7 @@ module VagrantPlugins
 
           # Vagrant gives you adapter 0 by default
           # Assign interfaces to slots.
-          configured_networks(env, @logger).each do |options|
+          configured_networks(env[:machine], @logger).each do |options|
             # don't need to create interface for this type
             next if options[:iface_type] == :forwarded_port
 
@@ -61,7 +64,7 @@ module VagrantPlugins
             # We have slot for interface, fill it with interface configuration.
             adapters[free_slot] = options
             adapters[free_slot][:network_name] = interface_network(
-              env[:machine].provider.driver.connection.client, adapters[free_slot]
+              env[:machine].provider.driver, adapters[free_slot]
             )
           end
 
@@ -76,6 +79,7 @@ module VagrantPlugins
             @mac = iface_configuration.fetch(:mac, false)
             @model_type = iface_configuration.fetch(:model_type, @nic_model_type)
             @driver_name = iface_configuration.fetch(:driver_name, false)
+            @driver_iommu = iface_configuration.fetch(:driver_iommu, false )
             @driver_queues = iface_configuration.fetch(:driver_queues, false)
             @device_name = iface_configuration.fetch(:iface_name, false)
             @mtu = iface_configuration.fetch(:mtu, nil)
@@ -84,14 +88,18 @@ module VagrantPlugins
             template_name = 'interface'
             @type = nil
             @udp_tunnel = nil
+
+            @logger.debug("Interface configuration: #{iface_configuration}")
             # Configuration for public interfaces which use the macvtap driver
             if iface_configuration[:iface_type] == :public_network
               @device = iface_configuration.fetch(:dev, 'eth0')
               @mode = iface_configuration.fetch(:mode, 'bridge')
               @type = iface_configuration.fetch(:type, 'direct')
               @model_type = iface_configuration.fetch(:model_type, @nic_model_type)
+              @driver_iommu = iface_configuration.fetch(:driver_iommu, false )
               @driver_name = iface_configuration.fetch(:driver_name, false)
               @driver_queues = iface_configuration.fetch(:driver_queues, false)
+              @device_name = iface_configuration.fetch(:iface_name, nil)
               @portgroup = iface_configuration.fetch(:portgroup, nil)
               @network_name = iface_configuration.fetch(:network_name, @network_name)
               template_name = 'public_interface'
@@ -124,13 +132,14 @@ module VagrantPlugins
               }
               @tunnel_type = iface_configuration.fetch(:model_type, @nic_model_type)
               @driver_name = iface_configuration.fetch(:driver_name, false)
+              @driver_iommu = iface_configuration.fetch(:driver_iommu, false )
               @driver_queues = iface_configuration.fetch(:driver_queues, false)
               template_name = 'tunnel_interface'
               @logger.info("Setting up #{@type} tunnel interface using  #{@tunnel_ip} port #{@tunnel_port}")
             end
 
             message = "Creating network interface eth#{@iface_number}"
-            message += " connected to network #{@network_name}."
+            message += " connected to network #{@network_name} based on template #{template_name}."
             if @mac
               @mac = @mac.scan(/(\h{2})/).join(':')
               message += " Using MAC address: #{@mac}"
@@ -141,7 +150,9 @@ module VagrantPlugins
               # FIXME: all options for network driver should be hash from Vagrantfile
               driver_options = {}
               driver_options[:name] = @driver_name if @driver_name
+              driver_options[:iommu] = @driver_iommu ? "on" : "off" if @model_type == 'virtio'
               driver_options[:queues] = @driver_queues if @driver_queues
+
               @udp_tunnel ||= {}
               xml = if template_name == 'interface' or
                        template_name == 'tunnel_interface'
@@ -162,7 +173,7 @@ module VagrantPlugins
               @logger.debug {
                 "Attaching Network Device with XML:\n#{xml}"
               }
-              domain.attach_device(xml)
+              env[:machine].provider.driver.attach_device(xml)
             rescue => e
               raise Errors::AttachDeviceError,
                     error_message: e.message
@@ -259,12 +270,14 @@ module VagrantPlugins
               xml.source(source_options) do
                 xml.local(udp_tunnel) if type == 'udp'
               end
+
+              @logger.debug "Driver options: #{driver_options}"
+
               xml.mac(address: mac) if mac
               xml.target(dev: target_dev_name(device_name, type, iface_number))
-              xml.alias(name: "net#{iface_number}")
               xml.model(type: model_type.to_s)
               xml.mtu(size: Integer(mtu)) if mtu
-              xml.driver(driver_options)
+              xml.driver(**driver_options) if driver_options
               xml.address(type: 'pci', bus: pci_bus, slot: pci_slot) if pci_bus and pci_slot
             end
           end.to_xml(
@@ -282,7 +295,7 @@ module VagrantPlugins
         end
 
         # Return network name according to interface options.
-        def interface_network(libvirt_client, options)
+        def interface_network(driver, options)
           # no need to get interface network for tcp tunnel config
           return 'tunnel_interface' if options.fetch(:tunnel_type, nil)
 
@@ -292,7 +305,7 @@ module VagrantPlugins
           end
 
           # Get list of all (active and inactive) Libvirt networks.
-          available_networks = libvirt_networks(libvirt_client)
+          available_networks = libvirt_networks(driver)
 
           return 'public' if options[:iface_type] == :public_network
 

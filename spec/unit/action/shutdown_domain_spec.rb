@@ -1,6 +1,7 @@
-require 'spec_helper'
-require 'support/sharedcontext'
-require 'support/libvirt_context'
+# frozen_string_literal: true
+
+require_relative '../../spec_helper'
+
 require 'vagrant-libvirt/action/shutdown_domain'
 
 describe VagrantPlugins::ProviderLibvirt::Action::StartShutdownTimer do

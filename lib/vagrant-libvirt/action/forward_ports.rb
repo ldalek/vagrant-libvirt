@@ -93,7 +93,7 @@ module VagrantPlugins
             -N
             #{ssh_info[:host]}
           )
-          params += '-g' if gateway_ports
+          params <<= '-g' if gateway_ports
 
           options = (%W(
             User=#{ssh_info[:username]}
@@ -110,7 +110,7 @@ module VagrantPlugins
               end
           ).map { |s| ['-o', s] }.flatten
 
-          options += ['-o', "ProxyCommand=\"#{ssh_info[:proxy_command]}\""] if machine.provider_config.proxy_command
+          options += ['-o', "ProxyCommand=\"#{ssh_info[:proxy_command]}\""] if machine.provider_config.proxy_command && !machine.provider_config.proxy_command.empty?
 
           ssh_cmd = ['ssh'] + options + params
 

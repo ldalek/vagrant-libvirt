@@ -87,87 +87,108 @@ module VagrantPlugins
           end
 
           # cpu_mode
-          cpu = REXML::XPath.first(xml_descr, '/domain/cpu')
-          if cpu.nil?
-            @logger.debug "cpu_mode updated from not set to '#{config.cpu_mode}'"
-            descr_changed = true
-            cpu = REXML::Element.new('cpu', REXML::XPath.first(xml_descr, '/domain'))
-            cpu.attributes['mode'] = config.cpu_mode
-          else
-            if cpu.attributes['mode'] != config.cpu_mode
-              @logger.debug "cpu_mode updated from '#{cpu.attributes['mode']}' to '#{config.cpu_mode}'"
+          if !config.cpu_mode.nil?
+            cpu = REXML::XPath.first(xml_descr, '/domain/cpu')
+            if cpu.nil?
+              @logger.debug "cpu_mode updated from not set to '#{config.cpu_mode}'"
               descr_changed = true
+              cpu = REXML::Element.new('cpu', REXML::XPath.first(xml_descr, '/domain'))
               cpu.attributes['mode'] = config.cpu_mode
+            else
+              if cpu.attributes['mode'] != config.cpu_mode
+                @logger.debug "cpu_mode updated from '#{cpu.attributes['mode']}' to '#{config.cpu_mode}'"
+                descr_changed = true
+                cpu.attributes['mode'] = config.cpu_mode
+              end
             end
+
+            if config.cpu_mode != 'host-passthrough'
+              cpu_model = REXML::XPath.first(xml_descr, '/domain/cpu/model')
+              if cpu_model.nil?
+                if config.cpu_model.strip != ''
+                  @logger.debug "cpu_model updated from not set to '#{config.cpu_model}'"
+                  descr_changed = true
+                  cpu_model = REXML::Element.new('model', REXML::XPath.first(xml_descr, '/domain/cpu'))
+                  cpu_model.attributes['fallback'] = config.cpu_fallback
+                  cpu_model.text = config.cpu_model
+                end
+              else
+                if (cpu_model.text or '').strip != config.cpu_model.strip
+                  @logger.debug "cpu_model text updated from #{cpu_model.text} to '#{config.cpu_model}'"
+                  descr_changed = true
+                  cpu_model.text = config.cpu_model
+                end
+                if cpu_model.attributes['fallback'] != config.cpu_fallback
+                  @logger.debug "cpu_model fallback attribute updated from #{cpu_model.attributes['fallback']} to '#{config.cpu_fallback}'"
+                  descr_changed = true
+                  cpu_model.attributes['fallback'] = config.cpu_fallback
+                end
+              end
+              vmx_feature = REXML::XPath.first(xml_descr, '/domain/cpu/feature[@name="vmx"]')
+              svm_feature = REXML::XPath.first(xml_descr, '/domain/cpu/feature[@name="svm"]')
+              if config.nested
+                if vmx_feature.nil?
+                  @logger.debug "nested mode enabled from unset by setting cpu vmx feature"
+                  descr_changed = true
+                  vmx_feature = REXML::Element.new('feature', REXML::XPath.first(xml_descr, '/domain/cpu'))
+                  vmx_feature.attributes['policy'] = 'optional'
+                  vmx_feature.attributes['name'] = 'vmx'
+                end
+                if svm_feature.nil?
+                  @logger.debug "nested mode enabled from unset by setting cpu svm feature"
+                  descr_changed = true
+                  svm_feature = REXML::Element.new('feature', REXML::XPath.first(xml_descr, '/domain/cpu'))
+                  svm_feature.attributes['policy'] = 'optional'
+                  svm_feature.attributes['name'] = 'svm'
+                end
+              else
+                unless vmx_feature.nil?
+                  @logger.debug "nested mode disabled for cpu by removing vmx feature"
+                  descr_changed = true
+                  cpu.delete_element(vmx_feature)
+                end
+                unless svm_feature.nil?
+                  @logger.debug "nested mode disabled for cpu by removing svm feature"
+                  descr_changed = true
+                  cpu.delete_element(svm_feature)
+                end
+              end
+            elsif config.numa_nodes == nil
+              unless cpu.elements.to_a.empty?
+                @logger.debug "switching cpu_mode to host-passthrough and removing emulated cpu features"
+                descr_changed = true
+                cpu.elements.each do |elem|
+                  cpu.delete_element(elem)
+                end
+              end
+            end
+          else
+            xml_descr.delete_element('/domain/cpu')
           end
 
-          if config.cpu_mode != 'host-passthrough'
-            cpu_model = REXML::XPath.first(xml_descr, '/domain/cpu/model')
-            if cpu_model.nil?
-              if config.cpu_model.strip != ''
-                @logger.debug "cpu_model updated from not set to '#{config.cpu_model}'"
-                descr_changed = true
-                cpu_model = REXML::Element.new('model', REXML::XPath.first(xml_descr, '/domain/cpu'))
-                cpu_model.attributes['fallback'] = 'allow'
-                cpu_model.text = config.cpu_model
-              end
-            else
-              if (cpu_model.text or '').strip != config.cpu_model.strip
-                @logger.debug "cpu_model text updated from #{cpu_model.text} to '#{config.cpu_model}'"
-                descr_changed = true
-                cpu_model.text = config.cpu_model
-              end
-              if cpu_model.attributes['fallback'] != config.cpu_fallback
-                @logger.debug "cpu_model fallback attribute updated from #{cpu_model.attributes['fallback']} to '#{config.cpu_fallback}'"
-                descr_changed = true
-                cpu_model.attributes['fallback'] = config.cpu_fallback
-              end
-            end
-            vmx_feature = REXML::XPath.first(xml_descr, '/domain/cpu/feature[@name="vmx"]')
-            svm_feature = REXML::XPath.first(xml_descr, '/domain/cpu/feature[@name="svm"]')
-            if config.nested
-              if vmx_feature.nil?
-                @logger.debug "nested mode enabled from unset by setting cpu vmx feature"
-                descr_changed = true
-                vmx_feature = REXML::Element.new('feature', REXML::XPath.first(xml_descr, '/domain/cpu'))
-                vmx_feature.attributes['policy'] = 'optional'
-                vmx_feature.attributes['name'] = 'vmx'
-              end
-              if svm_feature.nil?
-                @logger.debug "nested mode enabled from unset by setting cpu svm feature"
-                descr_changed = true
-                svm_feature = REXML::Element.new('feature', REXML::XPath.first(xml_descr, '/domain/cpu'))
-                svm_feature.attributes['policy'] = 'optional'
-                svm_feature.attributes['name'] = 'svm'
-              end
-            else
-              unless vmx_feature.nil?
-                @logger.debug "nested mode disabled for cpu by removing vmx feature"
-                descr_changed = true
-                cpu.delete_element(vmx_feature)
-              end
-              unless svm_feature.nil?
-                @logger.debug "nested mode disabled for cpu by removing svm feature"
-                descr_changed = true
-                cpu.delete_element(svm_feature)
-              end
-            end
-          elsif config.numa_nodes == nil
-            unless cpu.elements.to_a.empty?
-              @logger.debug "switching cpu_mode to host-passthrough and removing emulated cpu features"
-              descr_changed = true
-              cpu.elements.each do |elem|
-                cpu.delete_element(elem)
-              end
-            end
+          # Clock - can change in complicated ways, so just build a new clock and compare
+          newclock = REXML::Element.new('newclock')
+          if not config.clock_absolute.nil?
+            newclock.add_attribute('offset', 'absolute')
+            newclock.add_attribute('start', config.clock_absolute)
+          elsif not config.clock_adjustment.nil?
+            newclock.add_attribute('offset', 'variable')
+            newclock.add_attribute('basis', config.clock_basis)
+            newclock.add_attribute('adjustment', config.clock_adjustment)
+          elsif not config.clock_timezone.nil?
+            newclock.add_attribute('offset', 'timezone')
+            newclock.add_attribute('timezone', config.clock_timezone)
+          else
+            newclock.add_attribute('offset', config.clock_offset)
           end
-
-          # Clock
           clock = REXML::XPath.first(xml_descr, '/domain/clock')
-          if clock.attributes['offset'] != config.clock_offset
-            @logger.debug "clock offset changed"
+          if clock.attributes != newclock.attributes
+            @logger.debug "clock definition changed"
             descr_changed = true
-            clock.attributes['offset'] = config.clock_offset
+            clock.attributes.clear
+            newclock.attributes.each do |attr, value|
+              clock.add_attribute(attr, value)
+            end
           end
 
           # clock timers - because timers can be added/removed, just rebuild and then compare
@@ -190,6 +211,68 @@ module VagrantPlugins
             end
           end
 
+          # Launch security
+          launchSecurity = REXML::XPath.first(xml_descr, '/domain/launchSecurity')
+          unless config.launchsecurity_data.nil?
+            if launchSecurity.nil?
+              @logger.debug "Launch security has been added"
+              launchSecurity = REXML::Element.new('launchSecurity', REXML::XPath.first(xml_descr, '/domain'))
+              descr_changed = true
+            end
+
+            if launchSecurity.attributes['type'] != config.launchsecurity_data[:type]
+              launchSecurity.attributes['type'] = config.launchsecurity_data[:type]
+              descr_changed = true
+            end
+
+            [:cbitpos, :policy, :reducedPhysBits].each do |setting|
+              setting_value = config.launchsecurity_data[setting]
+              element = REXML::XPath.first(launchSecurity, setting.to_s)
+              if !setting_value.nil?
+                if element.nil?
+                  element = launchSecurity.add_element(setting.to_s)
+                  descr_changed = true
+                end
+
+                if element.text != setting_value
+                  @logger.debug "launchSecurity #{setting.to_s} config changed"
+                  element.text = setting_value
+                  descr_changed = true
+                end
+              else
+                if !element.nil?
+                  launchSecurity.delete_element(setting.to_s)
+                  descr_changed = true
+                end
+              end
+            end
+
+            controllers = REXML::XPath.each( xml_descr, '/domain/devices/controller')
+            memballoon = REXML::XPath.each( xml_descr, '/domain/devices/memballoon')
+            [controllers, memballoon].lazy.flat_map(&:lazy).each do |controller|
+              driver_node = REXML::XPath.first(controller, 'driver')
+              driver_node = controller.add_element('driver') if driver_node.nil?
+              descr_changed = true if driver_node.attributes['iommu'] != 'on'
+              driver_node.attributes['iommu'] = 'on'
+            end
+          else
+            unless launchSecurity.nil?
+              @logger.debug "Launch security to be deleted"
+
+              descr_changed = true
+
+              launchSecurity.parent.delete_element(launchSecurity)
+            end
+
+            REXML::XPath.each( xml_descr, '/domain/devices/controller') do | controller |
+              driver_node = REXML::XPath.first(controller, 'driver')
+              if !driver_node.nil?
+                descr_changed = true if driver_node.attributes['iommu']
+                driver_node.attributes.delete('iommu')
+              end
+            end
+          end
+
           # Graphics
           graphics = REXML::XPath.first(xml_descr, '/domain/devices/graphics')
           if config.graphics_type != 'none'
@@ -206,13 +289,29 @@ module VagrantPlugins
               graphics.attributes['listen'] = config.graphics_ip
               graphics.delete_element('//listen')
             end
-            if graphics.attributes['autoport'] != config.graphics_autoport
-              descr_changed = true
-              graphics.attributes['autoport'] = config.graphics_autoport
-              if config.graphics_autoport == 'no'
-                graphics.attributes.delete('autoport')
+            unless config.graphics_port.nil? or config.graphics_port == -1
+              if graphics.attributes['autoport'] != 'no'
+                descr_changed = true
+                graphics.attributes['autoport'] = 'no'
+              end
+              if graphics.attributes['port'] != config.graphics_port
+                descr_changed = true
                 graphics.attributes['port'] = config.graphics_port
               end
+            else
+              if graphics.attributes['autoport'] != config.graphics_autoport
+                descr_changed = true
+                graphics.attributes['autoport'] = config.graphics_autoport
+                if config.graphics_autoport == 'no'
+                  graphics.attributes['port'] = config.graphics_port
+                else
+                  graphics.attributes['port'] = '-1'
+                end
+              end
+            end
+            if graphics.attributes['websocket'] != config.graphics_websocket.to_s
+              descr_changed = true
+              graphics.attributes['websocket'] = config.graphics_websocket
             end
             if graphics.attributes['keymap'] != config.keymap
               descr_changed = true
@@ -429,9 +528,20 @@ module VagrantPlugins
               raise Errors::UpdateServerError, error_message: e.message
             end
 
+            # this normalises the attribute order to be the same as what was sent in the above
+            # request to update the domain XML. Without this, if the XML documents are not
+            # equivalent, many more differences will be reported than there actually are.
+            applied_xml = String.new
+            REXML::Document.new(libvirt_domain.xml_desc(1)).write(applied_xml)
+
             # need to check whether the updated XML contains all the changes requested
             proposed = VagrantPlugins::ProviderLibvirt::Util::Xml.new(new_xml)
-            applied = VagrantPlugins::ProviderLibvirt::Util::Xml.new(libvirt_domain.xml_desc(1))
+            applied = VagrantPlugins::ProviderLibvirt::Util::Xml.new(applied_xml)
+
+            # perform some sorting to allow comparison otherwise order of devices differing
+            # even if they are equivalent will be reported as being different.
+            proposed.xml['devices'][0].each { |_, v| next unless v.is_a?(Array); v.sort_by! { |e| [e['type'], e['index']]} }
+            applied.xml['devices'][0].each { |_, v| next unless v.is_a?(Array); v.sort_by! { |e| [e['type'], e['index']]} }
 
             if proposed != applied
               require 'diffy'
@@ -465,6 +575,23 @@ module VagrantPlugins
             domain.start
           rescue Fog::Errors::Error, Errors::VagrantLibvirtError => e
             raise Errors::DomainStartError, error_message: e.message
+          end
+
+          #libvirt_domain = env[:machine].provider.driver.connection.client.lookup_domain_by_uuid(env[:machine].id)
+          xmldoc = REXML::Document.new(libvirt_domain.xml_desc)
+          graphics = REXML::XPath.first(xmldoc, '/domain/devices/graphics')
+
+          if !graphics.nil?
+            if config.graphics_autoport
+              env[:ui].info(I18n.t('vagrant_libvirt.starting_domain_with_graphics'))
+              env[:ui].info(" -- Graphics Port:      #{graphics.attributes['port']}")
+              env[:ui].info(" -- Graphics IP:        #{graphics.attributes['listen']}")
+              env[:ui].info(" -- Graphics Password:  #{config.graphics_passwd.nil? ? 'Not defined' : 'Defined'}")
+            end
+
+            if config.graphics_websocket == -1
+              env[:ui].info(" -- Graphics Websocket: #{graphics.attributes['websocket']}")
+            end
           end
 
           @app.call(env)

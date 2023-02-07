@@ -88,6 +88,11 @@ end
   set, which should be fine for paravirtualized guests, but some fully
   virtualized guests may require hda. NOTE: this option also applies only to
   disks associated with a box image.
+* `disk_address_type` - The address type of disk device to emulate.
+  Libvirt uses a sensible default if not set, but some fully virtualized guests
+  may need to override this (e.g. Debian on _virt_ machine may need _virtio-mmio_).
+  Possible values are documented in libvirt's [description for
+  _address_](https://libvirt.org/formatdomain.html#elementsAddress).
 * `disk_driver` - Extra options for the main disk driver ([see Libvirt documentation](http://libvirt.org/formatdomain.html#elementsDisks)).
   NOTE: this option also applies only to disks associated with a box image. In all cases, the value `nil` can be used to force the hypervisor default behaviour (e.g. to override settings defined in top-level Vagrantfiles). Supported options include:
   * `:cache` - Controls the cache mechanism. Possible values are "default", "none", "writethrough", "writeback", "directsync" and "unsafe".
@@ -96,6 +101,7 @@ end
   * `:discard` - Controls whether discard requests (also known as "trim" or "unmap") are ignored or passed to the filesystem. Possible values are "unmap" or "ignore".
     Note: for discard to work, you will likely also need to set `disk_bus = 'scsi'`
   * `:detect_zeroes` - Controls whether to detect zero write requests. The value can be "off", "on" or "unmap".
+  * `address_type` - Address type of disk device to emulate. If unspecified, Libvirt uses a sensible default.
 * `nic_model_type` - parameter specifies the model of the network adapter when
   you create a domain value by default virtio KVM believe possible values, see
   the [documentation for
@@ -105,7 +111,6 @@ end
 * `cpus` - Number of virtual cpus. Defaults to 1 if not set.
 * `cpuset` - Physical cpus to which the vcpus can be pinned. For more details see [documentation](https://libvirt.org/formatdomain.html#elementsCPUAllocation).
 * `cputopology` - Number of CPU sockets, cores and threads running per core. All fields of `:sockets`, `:cores` and `:threads` are mandatory, `cpus` domain option must be present and must be equal to total count of **sockets * cores * threads**. For more details see [documentation](https://libvirt.org/formatdomain.html#elementsCPU).
-* `nodeset` - Physical NUMA nodes where virtual memory can be pinned. For more details see [documentation](https://libvirt.org/formatdomain.html#elementsNUMATuning).
 
   ```ruby
   Vagrant.configure("2") do |config|
@@ -117,6 +122,18 @@ end
   end
   ```
 
+* `cpuaffinitiy` - Mapping of vCPUs to host CPUs. [See `vcpupin`](https://libvirt.org/formatdomain.html#cpu-tuning).
+
+  ```ruby
+  Vagrant.configure("2") do |config|
+    config.vm.provider :libvirt do |libvirt|
+      libvirt.cpus = 4
+      libvirt.cpuaffinitiy 0 => '0-4,^3', 1 => '5', 2 => '6,7'
+    end
+  end
+  ```
+
+* `nodeset` - Physical NUMA nodes where virtual memory can be pinned. For more details see [documentation](https://libvirt.org/formatdomain.html#elementsNUMATuning).
 * `nested` - [Enable nested virtualization](https://docs.fedoraproject.org/en-US/quick-docs/using-nested-virtualization-in-kvm/).
   Default is false.
 * `cpu_mode` - [CPU emulation mode](https://libvirt.org/formatdomain.html#elementsCPU). Defaults to
@@ -138,6 +155,14 @@ end
     {:cpus => "2-3", :memory => "4096"}
   ]
   ```
+* `launchsecurity` - Configure Secure Encryption Virtualization for the guest, requires additional components to be configured to work, see [examples](./examples.html#secure-encryption-virtualization). For more information look at [libvirt documentation](https://libvirt.org/kbase/launch_security_sev.html).
+  ```
+  libvirt.launchsecurity :type => 'sev', :cbitpos => 47, :reducedPhysBits => 1, :policy => "0x0003"
+  ```
+* `memtune` - Configure the memtune settings for the guest, primarily exposed to facilitate enabling Secure Encryption Virtualization. Note that when configuring `hard_limit` that the value is in kB as opposed to `libvirt.memory` which is in Mb. Additionally it must be set to be higher than `libvirt.memory`, see [libvirt documentation](https://libvirt.org/kbase/launch_security_sev.html) for details on why.
+  ```
+  libvirt.memtune :type => "hard_limit", :value => 2500000 # Note here the value in kB (not in Mb)
+  ```
 * `loader` - Sets path to custom UEFI loader.
 * `kernel` - To launch the guest with a kernel residing on host filesystems.
   Equivalent to qemu `-kernel`.
@@ -150,6 +175,9 @@ end
   or "spice".
 * `graphics_port` - Sets the port for the display protocol to bind to.
   Defaults to `-1`, which will be set automatically by libvirt.
+* `graphics_websocket` - Sets the websocket port for the display protocol to bind to.
+  Defaults to `-1`, which will be set automatically by libvirt.
+  The autoport configuration has no effect on the websocket port due to security reasons.
 * `graphics_ip` - Sets the IP for the display protocol to bind to.  Defaults to
   "127.0.0.1".
 * `graphics_passwd` - Sets the password for the display protocol. Working for
@@ -286,6 +314,7 @@ defined domain:
 * `cpu_mode` - Updated. Pay attention that custom mode is not supported
 * `graphics_type` - Updated
 * `graphics_port` - Updated
+* `graphics_websocket` - Updated
 * `graphics_ip` - Updated
 * `graphics_passwd` - Updated
 * `graphics_autoport` - Updated
@@ -465,9 +494,11 @@ starts with `libvirt__` string. Here is a list of those options:
   for for more information. *Note: takes either 'yes' or 'no' for value*
 * `:libvirt__ipv6_address` - Define ipv6 address, require also prefix.
 * `:libvirt__ipv6_prefix` - Define ipv6 prefix. generate string `<ip family="ipv6" address="address" prefix="prefix" >`
-* `:libvirt__iface_name` - Define a name for the private network interface.
-  With this feature one can [simulate physical link
-  failures](https://github.com/vagrant-libvirt/vagrant-libvirt/pull/498)
+* `:libvirt__iface_name` - Define a name for the corresponding network interface
+  created on the host. With this feature one can [simulate physical link
+  failures](https://github.com/vagrant-libvirt/vagrant-libvirt/pull/498). Note
+  that you cannot use names reserved for libvirt's usage based on [documentation](
+  https://libvirt.org/formatdomain.html#overriding-the-target-element).
 * `:mac` - MAC address for the interface. *Note: specify this in lowercase
   since Vagrant network scripts assume it will be!*
 * `:libvirt__mtu` - MTU size for the Libvirt network, if not defined, the
@@ -513,6 +544,14 @@ virtual network.
 * `:trust_guest_rx_filters` - Support trustGuestRxFilters attribute. Details
   are listed [here](http://www.libvirt.org/formatdomain.html#elementsNICSDirect).
   Default is 'false'.
+* `:libvirt__iface_name` - Define a name for the corresponding network interface
+  that is created on the host connected to the bridge dev. This can be used to
+  help attach VLAN tags to specific VMs by adjusting the pattern to match. Note
+  that you cannot use names reserved for libvirt's usage based on [documentation](
+  https://libvirt.org/formatdomain.html#overriding-the-target-element).
+* `:libvirt__mtu` - MTU size for the Libvirt interface, if not defined, the
+  created network will use the Libvirt default (1500). VMs still need to configure
+  their internal interface MTUs.
 
 Additionally for public networks, to facilitate validating if the device provided
 can be used, vagrant-libvirt will check both the host interfaces visible to libvirt
@@ -553,6 +592,7 @@ used by this network are configurable at the provider level.
   the Libvirt default (1500) will be used.
 * `management_network_keep` - Starting from version *0.7.0*, *always_destroy* is set to *true* by default for any network.
   This option allows to change this behaviour for the management network.
+* `management_network_model_type` - Model of the network adapter to use for the management interface. Default is 'virtio'.
 
 You may wonder how vagrant-libvirt knows the IP address a VM received.  Libvirt
 doesn't provide a standard way to find out the IP address of a running domain.
@@ -670,6 +710,25 @@ Vagrant.configure("2") do |config|
     libvirt.storage :file, :device => :cdrom, :path => '/path/to/iso1.iso'
     libvirt.storage :file, :device => :cdrom, :path => '/path/to/iso2.iso'
     libvirt.storage :file, :device => :cdrom, :path => '/path/to/iso3.iso'
+  end
+end
+```
+
+## Floppies
+
+You can attach up to two floppies to a VM via `libvirt.storage :file,
+:device => :floppy`. Available options are:
+
+* `path` - The path to the vfd image to be used for the floppy drive.
+* `dev` - The device to use (`fda` or `fdb`). This will be
+  automatically determined if unspecified.
+
+The following example creates a floppy drive in the VM:
+
+```ruby
+Vagrant.configure("2") do |config|
+  config.vm.provider :libvirt do |libvirt|
+    libvirt.storage :file, :device => :floppy, :path => '/path/to/floppy.vfs'
   end
 end
 ```
@@ -987,9 +1046,18 @@ end
 
 ## Clock
 
-Clock offset can be specified via `libvirt.clock_offset`. (Default is utc)
+The clock can be configured using one of the following methods:
 
-Additionally timers can be specified via `libvirt.clock_timer`.
+* Set nothing, and the clock will default to UTC.
+* Set `libvirt.clock_offset` to 'utc' or 'localtime' by assigning the respective values.
+* To set the clock to a different timezone, assign the timezone name to `libvirt.clock_timezone`.
+* To set the clock to the same absolute time whenever the VM starts, set `libvirt.clock_absolute`.
+  The value format is that of an epoch timestamp.
+* To set the clock at an arbitrary offset to realtime, use `libvirt.clock_adjustment`.
+  Specify the offset adjustment in seconds.  By default, the clock offset is relative to UTC,
+  but this can be changed by setting `libvirt.clock_basis` to 'localtime'.
+
+In addition to the above, timers can be specified via `libvirt.clock_timer`.
 Available options for timers are: name, track, tickpolicy, frequency, mode,  present
 
 ```ruby
